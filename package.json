@@ -1,0 +1,35 @@
+{
+	"name": "voice-agent-engine",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Standalone voice API gateway (STT now, TTS + realtime later) fronting xAI. Your projects call this; it owns the xAI key.",
+	"scripts": {
+		"dev": "tsx watch src/index.ts",
+		"start": "tsx src/index.ts",
+		"key:mint": "tsx scripts/mint-key.ts",
+		"key:list": "tsx scripts/list-keys.ts",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@hono/node-server": "^1.13.7",
+		"@livekit/protocol": "^1.49.0",
+		"better-sqlite3": "^11.8.1",
+		"dotenv": "^16.4.7",
+		"hono": "^4.6.14",
+		"livekit-server-sdk": "^2.16.0",
+		"postgres": "^3.4.9",
+		"ws": "^8.18.0",
+		"zod": "^3.24.1"
+	},
+	"devDependencies": {
+		"@types/better-sqlite3": "^7.6.12",
+		"@types/node": "^22.10.5",
+		"@types/ws": "^8.5.13",
+		"tsx": "^4.19.2",
+		"typescript": "^5.7.3"
+	},
+	"engines": {
+		"node": ">=20"
+	}
+}

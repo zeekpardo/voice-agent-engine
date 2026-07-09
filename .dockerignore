@@ -1,0 +1,11 @@
+node_modules
+data
+*.db
+*.db-*
+.env
+.env.local
+.test-key
+.git
+.DS_Store
+*.log
+dist

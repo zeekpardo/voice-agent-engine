@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Incoming call — Diamond Realty AI</title>
+<style>
+  :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
+  body { max-width: 560px; margin: 60px auto; padding: 0 20px; text-align: center; }
+  #status { display: inline-block; padding: 4px 14px; border-radius: 999px; background: #8883; }
+  button { font-size: 1.05rem; padding: 12px 28px; border-radius: 10px; border: none;
+           cursor: pointer; background: #2e7d32; color: #fff; margin-top: 18px; }
+  button.hangup { background: #c62828; }
+  #transcript { text-align: left; margin-top: 28px; display: flex; flex-direction: column; gap: 8px; }
+  .turn { padding: 8px 14px; border-radius: 12px; max-width: 85%; }
+  .turn.agent { background: #8882; align-self: flex-start; }
+  .turn.user { background: #2e7d3222; align-self: flex-end; }
+  .hint { opacity: .6; font-size: .85rem; }
+</style>
+</head>
+<body>
+  <h2>📞 Diamond Realty's AI assistant is calling…</h2>
+  <p class="hint">You are the <b>lender's office</b>. Answer and tell the assistant whatever you like —
+  contact made, appointment booked, docs in, approved… The workflow reacts to what you confirm.</p>
+  <div><span id="status">ringing</span></div>
+  <button id="btn">Answer call</button>
+  <div id="transcript"></div>
+
+<script type="module">
+import { Room, RoomEvent } from "https://esm.sh/livekit-client@2";
+
+const btn = document.getElementById("btn");
+const statusEl = document.getElementById("status");
+const transcriptEl = document.getElementById("transcript");
+const segments = new Map();
+let room = null;
+
+function render() {
+  transcriptEl.innerHTML = "";
+  for (const [, s] of segments) {
+    const d = document.createElement("div");
+    d.className = `turn ${s.role}`;
+    d.textContent = s.text;
+    transcriptEl.appendChild(d);
+  }
+}
+
+btn.addEventListener("click", async () => {
+  if (room) { room.disconnect(); return; }
+  btn.disabled = true;
+  try {
+    const creds = await (await fetch(`${location.pathname}/creds`)).json();
+    if (!creds.token) throw new Error(creds.error ?? "call expired — wait for the next follow-up");
+    room = new Room();
+    room.registerTextStreamHandler("lk.transcription", async (reader, info) => {
+      const id = reader.info.attributes?.["lk.segment_id"] ?? reader.info.id;
+      const role = info.identity === room.localParticipant.identity ? "user" : "agent";
+      let text = "";
+      for await (const chunk of reader) { text += chunk; segments.set(id, { role, text }); render(); }
+    });
+    room.on(RoomEvent.TrackSubscribed, (t) => { if (t.kind === "audio") document.body.appendChild(t.attach()); });
+    room.on(RoomEvent.ParticipantAttributesChanged, (_c, p) => {
+      const s = p.attributes["lk.agent.state"]; if (s) statusEl.textContent = s;
+    });
+    room.on(RoomEvent.Disconnected, () => {
+      statusEl.textContent = "call ended — check the dashboard";
+      btn.textContent = "Call ended"; btn.disabled = true; room = null;
+    });
+    await room.connect(creds.room_url, creds.token);
+    await room.localParticipant.setMicrophoneEnabled(true);
+    statusEl.textContent = "connected";
+    btn.textContent = "Hang up"; btn.className = "hangup"; btn.disabled = false;
+  } catch (err) {
+    statusEl.textContent = "error"; btn.disabled = false;
+    document.body.insertAdjacentHTML("beforeend", `<p class="hint">${err}</p>`);
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Diamond Realty — AI Lender Follow-Up</title>
+<style>
+  :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
+  body { max-width: 860px; margin: 32px auto; padding: 0 20px; }
+  h1 { font-size: 1.35rem; } .sub { opacity: .65; font-size: .9rem; margin-top: -8px; }
+  button { font-size: .95rem; padding: 8px 18px; border-radius: 8px; border: 1px solid #8886;
+           cursor: pointer; background: #4462ff; color: #fff; }
+  .card { border: 1px solid #8884; border-radius: 14px; padding: 16px 20px; margin: 16px 0; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .pill { padding: 3px 12px; border-radius: 999px; font-size: .8rem; font-weight: 600; }
+  .assigned { background: #8883; } .contacted { background: #1565c033; }
+  .docs_submitted { background: #ef6c0033; } .approved { background: #2e7d3244; }
+  .stalled { background: #c6282833; }
+  .timer { font-variant-numeric: tabular-nums; opacity: .75; font-size: .85rem; }
+  .answer { background: #2e7d32; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .6; } }
+  .log { margin-top: 12px; font-size: .85rem; max-height: 300px; overflow-y: auto; }
+  .entry { padding: 6px 0; border-top: 1px dashed #8883; }
+  .entry time { opacity: .5; margin-right: 8px; font-variant-numeric: tabular-nums; }
+  details > summary { cursor: pointer; }
+  pre { white-space: pre-wrap; background: #8881; padding: 10px; border-radius: 8px; font-size: .8rem; }
+  .meta { font-size: .85rem; opacity: .75; }
+</style>
+</head>
+<body>
+  <h1>🏦 Diamond Realty Group — AI Lender Follow-Up</h1>
+  <p class="sub">The workflow (timers, emails, state machine) runs in this app; the voice engine only makes the calls and returns structured outcomes. Time is compressed: <b>1 workflow-hour = <span id="ts"></span>s</b>.</p>
+  <button id="add">+ Assign demo buyer to lender</button>
+  <div id="buyers"></div>
+
+<script>
+const fmtCountdown = (ms) => {
+  if (ms <= 0) return "due now";
+  const s = Math.ceil(ms / 1000);
+  return s >= 60 ? `in ${Math.floor(s/60)}m ${s%60}s` : `in ${s}s`;
+};
+const KIND_ICON = { email: "📧", call: "📞", status: "ℹ️", tool: "🔧", escalation: "⚠️" };
+
+async function refresh() {
+  const res = await fetch("/state");
+  const { timescale, now, buyers } = await res.json();
+  document.getElementById("ts").textContent = timescale;
+  const root = document.getElementById("buyers");
+  root.innerHTML = "";
+  for (const b of buyers) {
+    const card = document.createElement("div");
+    card.className = "card";
+    const timer = b.nextActionAt
+      ? `<span class="timer">⏱ ${b.nextActionLabel}: ${fmtCountdown(b.nextActionAt - now)}</span>` : "";
+    const answer = b.pendingCall
+      ? `<a href="${b.pendingCall.joinUrl}" target="_blank"><button class="answer">📞 Answer as ${b.lenderName.split(" ")[0]}</button></a>` : "";
+    card.innerHTML = `
+      <div class="row">
+        <b>${b.name}</b>
+        <span class="pill ${b.status}">${b.status.replace("_"," ").toUpperCase()}</span>
+        ${timer} ${answer}
+      </div>
+      <div class="meta">${b.property} · Lender: ${b.lenderName} · follow-ups without response: ${b.followupsWithoutResponse}</div>
+      <div class="log">${b.log.map(e => `
+        <div class="entry"><time>${new Date(e.ts).toLocaleTimeString()}</time>${KIND_ICON[e.kind] ?? ""} ${
+          e.body ? `<details><summary>${e.title}</summary><pre>${e.body.replace(/</g,"&lt;")}</pre></details>` : e.title
+        }</div>`).join("")}
+      </div>`;
+    root.appendChild(card);
+  }
+}
+document.getElementById("add").addEventListener("click", async () => {
+  await fetch("/buyers", { method: "POST", headers: {"Content-Type":"application/json"}, body: "{}" });
+  refresh();
+});
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>

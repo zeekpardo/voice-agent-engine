@@ -1,0 +1,11 @@
+# LiveKit Cloud agent deployment config (`lk agent create` / `lk agent deploy`).
+# The [agent] id is assigned by LiveKit Cloud on first create — run:
+#   cd worker && lk agent create .
+# then commit the file it rewrites. Secrets (GATEWAY_URL, GATEWAY_INTERNAL_KEY)
+# are set with:  lk agent update-secrets --secrets-file .env.production
+[project]
+  subdomain = ""
+
+[agent]
+  # Must match the gateway's LIVEKIT_AGENT_NAME (dispatch targets it by name).
+  name = "voice-agent"

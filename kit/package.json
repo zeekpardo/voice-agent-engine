@@ -1,0 +1,33 @@
+{
+  "name": "@noba/voice-kit",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Reusable voice for apps talking to voice-gateway: transcription (live mic streaming + file upload, React hook, backend helpers) and voice agents (sessions, webhooks, tools, useVoiceAgent).",
+  "exports": {
+    "./browser": {
+      "types": "./src/browser.d.ts",
+      "import": "./src/browser.js"
+    },
+    "./react": "./src/react.ts",
+    "./server": "./src/server.ts",
+    "./agent/react": "./src/agent/react.ts",
+    "./agent/server": "./src/agent/server.ts"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "livekit-client": "^2.13.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "typescript": "^5.7.3"
+  },
+  "files": ["src"]
+}

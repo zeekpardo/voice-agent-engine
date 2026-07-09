@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice Agent Demo</title>
+<style>
+  :root { color-scheme: light dark; font-family: -apple-system, system-ui, sans-serif; }
+  body { max-width: 640px; margin: 40px auto; padding: 0 20px; }
+  h1 { font-size: 1.3rem; }
+  #status { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: .85rem;
+            background: #8883; margin-left: 8px; }
+  #status.listening { background: #2e7d3233; } #status.speaking { background: #1565c033; }
+  #status.thinking { background: #ef6c0033; } #status.error { background: #c6282833; }
+  button { font-size: 1rem; padding: 10px 22px; border-radius: 8px; border: 1px solid #8886;
+           cursor: pointer; background: #4462ff; color: #fff; }
+  button.stop { background: #c62828; }
+  #transcript { margin-top: 24px; display: flex; flex-direction: column; gap: 8px; }
+  .turn { padding: 8px 14px; border-radius: 12px; max-width: 85%; line-height: 1.4; }
+  .turn.agent { background: #8882; align-self: flex-start; }
+  .turn.user  { background: #4462ff22; align-self: flex-end; }
+  .turn.interim { opacity: .55; }
+  #err { color: #c62828; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>🎙️ Voice Agent Demo <span id="status">idle</span></h1>
+  <p>Talks to the agent engine: this page → <code>/session</code> → gateway <code>/v1/sessions</code> → LiveKit room → agent-worker.</p>
+  <button id="btn">Start conversation</button>
+  <div id="err"></div>
+  <div id="transcript"></div>
+
+<script type="module">
+import { Room, RoomEvent } from "https://esm.sh/livekit-client@2";
+
+const btn = document.getElementById("btn");
+const statusEl = document.getElementById("status");
+const errEl = document.getElementById("err");
+const transcriptEl = document.getElementById("transcript");
+let room = null;
+
+const setStatus = (s) => { statusEl.textContent = s; statusEl.className = s; };
+
+const segments = new Map(); // id -> {role, text, final}
+function renderTranscript() {
+  transcriptEl.innerHTML = "";
+  for (const [, seg] of segments) {
+    const div = document.createElement("div");
+    div.className = `turn ${seg.role}${seg.final ? "" : " interim"}`;
+    div.textContent = seg.text;
+    transcriptEl.appendChild(div);
+  }
+  transcriptEl.lastElementChild?.scrollIntoView({ behavior: "smooth" });
+}
+
+async function start() {
+  btn.disabled = true; errEl.textContent = "";
+  setStatus("connecting");
+  try {
+    const res = await fetch("/session", { method: "POST" });
+    const session = await res.json();
+    if (!res.ok) throw new Error(session?.error?.message ?? `session failed (${res.status})`);
+
+    room = new Room();
+
+    room.registerTextStreamHandler("lk.transcription", async (reader, participantInfo) => {
+      const id = reader.info.attributes?.["lk.segment_id"] ?? reader.info.id;
+      const role = participantInfo.identity === room.localParticipant.identity ? "user" : "agent";
+      let text = "";
+      for await (const chunk of reader) {
+        text += chunk;
+        segments.set(id, { role, text, final: reader.info.attributes?.["lk.transcription_final"] === "true" });
+        renderTranscript();
+      }
+      const seg = segments.get(id);
+      if (seg) { seg.final = true; renderTranscript(); }
+    });
+
+    room.on(RoomEvent.ParticipantAttributesChanged, (_c, p) => {
+      const s = p.attributes["lk.agent.state"];
+      if (s === "listening" || s === "thinking" || s === "speaking") setStatus(s);
+    });
+    room.on(RoomEvent.TrackSubscribed, (track) => {
+      if (track.kind === "audio") track.attach() && document.body.appendChild(track.attach());
+    });
+    room.on(RoomEvent.Disconnected, () => { setStatus("ended"); btn.textContent = "Start conversation"; btn.className = ""; btn.disabled = false; room = null; });
+
+    await room.connect(session.room_url, session.token);
+    await room.localParticipant.setMicrophoneEnabled(true);
+    setStatus("listening");
+    btn.textContent = "End conversation"; btn.className = "stop"; btn.disabled = false;
+  } catch (err) {
+    errEl.textContent = String(err);
+    setStatus("error"); btn.disabled = false;
+  }
+}
+
+btn.addEventListener("click", () => {
+  if (room) { room.disconnect(); } else { segments.clear(); renderTranscript(); start(); }
+});
+</script>
+</body>
+</html>

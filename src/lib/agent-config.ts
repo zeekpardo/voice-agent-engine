@@ -1,0 +1,393 @@
+import { z } from "zod";
+
+/**
+ * AgentConfig — the heart of engine neutrality (spec §4).
+ *
+ * An agent is a JSONB document; nothing vertical-specific is a first-class
+ * field. Vertical behavior enters only through `instructions` (language),
+ * `toolIds` (webhooks the consuming app implements), and `postCall.extract`
+ * (named outcome fields the consuming app asks for).
+ */
+export const AgentConfig = z.object({
+	// Identity
+	name: z.string().min(1),
+	description: z.string().optional(),
+
+	// Persona — the ONLY place vertical behavior lives as language
+	instructions: z.string().min(1),
+	greeting: z.string().optional(), // spoken first on inbound; omit → agent waits
+	language: z.string().default("en"), // BCP-47
+	fallbackLanguage: z.string().optional(),
+
+	// Models (resolved by the worker via LiveKit Inference / gateway proxies)
+	llm: z
+		.object({
+			model: z.string().default("grok-4-fast"),
+			temperature: z.number().min(0).max(2).default(0.4),
+			maxTokens: z.number().int().positive().default(400), // keep spoken turns short
+		})
+		.default({}),
+	stt: z
+		.object({
+			provider: z.string().default("xai"),
+			model: z.string().optional(),
+			diarize: z.boolean().default(false),
+		})
+		.default({}),
+	tts: z
+		.object({
+			provider: z.string().default("xai"),
+			voice: z.string().default("ara"),
+			speed: z.number().min(0.7).max(1.5).default(1.0),
+		})
+		.default({}),
+
+	// Conversation dynamics
+	turnDetection: z
+		.object({
+			mode: z.enum(["vad", "semantic"]).default("semantic"),
+			endpointingMs: z.number().int().positive().default(500),
+			allowInterruptions: z.boolean().default(true),
+			/** Start LLM+TTS on interim transcript before end-of-turn; draft is
+			 * discarded if the final transcript differs. Cuts response latency. */
+			preemptiveGeneration: z.boolean().default(true),
+		})
+		.default({}),
+	timeouts: z
+		.object({
+			maxCallSeconds: z.number().int().positive().default(900),
+			silenceHangupSeconds: z.number().int().positive().default(30),
+			noAnswerSeconds: z.number().int().positive().default(25),
+		})
+		.default({}),
+
+	/**
+	 * Opaque builder document (canvas positions, rich-text sections, mention
+	 * chips). The engine never reads it — it rides along in the config so the
+	 * builder UI round-trips through versioning for free.
+	 */
+	canvas: z.any().optional(),
+
+	// Multi-node flow (canvas-built agents). When present, the call runs as a
+	// graph of small agents: each node has its own instructions and gated
+	// tools, and moves to another node (or ends the call) through its exits.
+	// Single-agent configs simply omit this.
+	flow: z
+		.object({
+			entry: z.string().min(1), // node id the call starts on
+			nodes: z
+				.array(
+					z.object({
+						id: z.string().min(1),
+						name: z.string().optional(),
+						/** "agent" nodes converse; "router" nodes never speak: one LLM
+						 * evaluation over the conversation so far picks an exit and the
+						 * flow immediately continues to that exit's target (or ends the call).
+						 * "statement" nodes speak a fixed line and immediately move on —
+						 * deterministic, never waiting for the user. "transfer" nodes
+						 * simulate a warm transfer: optional announcement (in the current
+						 * voice), hold music for a few seconds, then the flow continues at
+						 * the target with a new voice that persists for the rest of the call. */
+						kind: z
+							.enum(["agent", "router", "statement", "transfer", "set_field", "modify_tags"])
+							.default("agent"),
+						/** Router-only: the statement/question evaluated against the
+						 * conversation (e.g. "The caller has confirmed they speak English"). */
+						router: z.object({ condition: z.string().min(1) }).optional(),
+						/** Statement-only: the exact line spoken ({{variables}} interpolated). */
+						statement: z.object({ say: z.string().min(1) }).optional(),
+						/** set_field-only: deterministically write one CRM field. */
+						setField: z
+							.object({
+								field: z.string().min(1),
+								value: z.string(),
+							})
+							.optional(),
+						/** modify_tags-only: deterministically add/remove contact tags. */
+						modifyTags: z
+							.object({
+								add: z.array(z.string().min(1)).default([]),
+								remove: z.array(z.string().min(1)).default([]),
+							})
+							.optional(),
+						/** Transfer-only: the simulated hand-off. */
+						transfer: z
+							.object({
+								/** Announcement spoken before the music, in the pre-transfer voice. */
+								say: z.string().optional(),
+								/** Hold-music duration between the two "people". */
+								holdSeconds: z.number().min(0).max(30).default(4),
+								/** Voice from here on; omit to keep the current voice. */
+								voice: z
+									.object({
+										provider: z.string(),
+										voice: z.string(),
+										speed: z.number().min(0.7).max(1.5).optional(),
+									})
+									.optional(),
+							})
+							.optional(),
+						instructions: z.string().min(1),
+						/** Agent-only: engine-verified data goals. When present, the
+						 * node's primary exit (exits[0]) is taken by the ENGINE once a
+						 * judge pass confirms every required objective — the
+						 * conversational LLM gets no exit tool for it. */
+						objectives: z
+							.array(
+								z.object({
+									/** Slug, unique within the node. */
+									key: z.string().min(1),
+									/** What must be learned from the caller — judged against this. */
+									description: z.string().min(1),
+									/** Human CRM field name (update_contact's field_name) auto-written when met. */
+									field: z.string().optional(),
+									/** Allowed values (picklist) — the judge coerces the answer to one of these. */
+									options: z.array(z.string().min(1)).min(2).optional(),
+									/** Required objectives gate the primary exit. */
+									required: z.boolean().default(true),
+									/** Give up after this many caller turns spent on the objective —
+									 * it stops gating the exit (CloseBot "Max Attempts"). */
+									maxAttempts: z.number().int().min(1).max(10).optional(),
+									/** Judge strictness 0-100: rating required to mark the objective
+									 * met (CloseBot "Sensitivity"). Default 90. */
+									sensitivity: z.number().min(0).max(100).optional(),
+								}),
+							)
+							.optional(),
+						/** Model override for the objective judge (default: cheap fast model). */
+						judge: z
+							.object({
+								model: z.string().min(1),
+								temperature: z.number().min(0).max(2).optional(),
+							})
+							.optional(),
+						/** Spoken direction generated when the node becomes active (skipped on the entry node — the greeting covers it). */
+						entryInstructions: z.string().optional(),
+						/** Tools available ONLY while this node is active (subset of the agent's toolIds). */
+						toolIds: z.array(z.string()).default([]),
+						/** Per-node LLM override, e.g. a cheap model for a yes/no filter node. */
+						llm: z
+							.object({
+								model: z.string(),
+								temperature: z.number().min(0).max(2).optional(),
+								maxTokens: z.number().int().positive().optional(),
+							})
+							.optional(),
+						exits: z
+							.array(
+								z.object({
+									name: z.string().min(1),
+									/** When to take this exit — becomes the exit tool's description. */
+									description: z.string().min(1),
+									/** Node id to move to; omit to end the call after this exit. */
+									target: z.string().optional(),
+								}),
+							)
+							.default([]),
+					}),
+				)
+				.min(1),
+			/**
+			 * Global detect-and-jump rules (CloseBot "Custom Scenario"): every agent
+			 * node gets one extra exit tool per scenario; the moment the described
+			 * situation appears, the flow jumps to the scenario's target node.
+			 */
+			scenarios: z
+				.array(
+					z.object({
+						name: z.string().min(1),
+						/** When to jump — becomes the scenario exit tool's description. */
+						description: z.string().min(1),
+						/** Node id the flow jumps to (any kind; routers/statements resolve inline). */
+						target: z.string().min(1),
+					}),
+				)
+				.default([]),
+		})
+		.optional()
+		.superRefine((flow, ctx) => {
+			if (!flow) return;
+			const sanitize = (s: string) =>
+				s
+					.toLowerCase()
+					.replace(/[^a-z0-9]+/g, "_")
+					.replace(/^_+|_+$/g, "");
+			const ids = new Set(flow.nodes.map((n) => n.id));
+			if (ids.size !== flow.nodes.length) {
+				ctx.addIssue({ code: "custom", message: "flow.nodes ids must be unique" });
+			}
+			if (!ids.has(flow.entry)) {
+				ctx.addIssue({ code: "custom", message: `flow.entry "${flow.entry}" is not a node id` });
+			}
+			const entryNode = flow.nodes.find((n) => n.id === flow.entry);
+			if (entryNode && entryNode.kind !== "agent") {
+				ctx.addIssue({
+					code: "custom",
+					message: `flow.entry "${flow.entry}" must be an agent node — a ${entryNode.kind} cannot run before any conversation exists`,
+				});
+			}
+			const scenarioNames = new Set<string>();
+			for (const scenario of flow.scenarios) {
+				if (!ids.has(scenario.target)) {
+					ctx.addIssue({
+						code: "custom",
+						message: `flow.scenarios "${scenario.name}" targets unknown node "${scenario.target}"`,
+					});
+				}
+				const key = sanitize(scenario.name);
+				if (scenarioNames.has(key)) {
+					ctx.addIssue({
+						code: "custom",
+						message: `flow.scenarios names must be unique — "${scenario.name}" collides after sanitization`,
+					});
+				}
+				scenarioNames.add(key);
+			}
+			for (const node of flow.nodes) {
+				if (node.objectives?.length) {
+					if (node.kind !== "agent") {
+						ctx.addIssue({
+							code: "custom",
+							message: `node "${node.id}" has objectives but is a ${node.kind} — only agent nodes converse and can gather objectives`,
+						});
+					}
+					const keys = new Set(node.objectives.map((o) => o.key));
+					if (keys.size !== node.objectives.length) {
+						ctx.addIssue({
+							code: "custom",
+							message: `node "${node.id}" objective keys must be unique`,
+						});
+					}
+				}
+				if (node.kind === "set_field") {
+					if (!node.setField?.field) {
+						ctx.addIssue({
+							code: "custom",
+							message: `set_field node "${node.id}" must define setField.field`,
+						});
+					}
+					if (node.exits.length > 1) {
+						ctx.addIssue({
+							code: "custom",
+							message: `set_field node "${node.id}" must have at most 1 exit — it writes a field and moves on`,
+						});
+					}
+				}
+				if (node.kind === "modify_tags") {
+					const add = node.modifyTags?.add ?? [];
+					const remove = node.modifyTags?.remove ?? [];
+					if (add.length === 0 && remove.length === 0) {
+						ctx.addIssue({
+							code: "custom",
+							message: `modify_tags node "${node.id}" must add or remove at least one tag`,
+						});
+					}
+					if (node.exits.length > 1) {
+						ctx.addIssue({
+							code: "custom",
+							message: `modify_tags node "${node.id}" must have at most 1 exit — it changes tags and moves on`,
+						});
+					}
+				}
+				if (node.kind === "router") {
+					if (!node.router?.condition) {
+						ctx.addIssue({
+							code: "custom",
+							message: `router node "${node.id}" must define router.condition`,
+						});
+					}
+					if (node.exits.length < 2) {
+						ctx.addIssue({
+							code: "custom",
+							message: `router node "${node.id}" must have at least 2 exits`,
+						});
+					}
+				}
+				if (node.kind === "statement") {
+					if (!node.statement?.say) {
+						ctx.addIssue({
+							code: "custom",
+							message: `statement node "${node.id}" must define statement.say`,
+						});
+					}
+					if (node.exits.length > 1) {
+						ctx.addIssue({
+							code: "custom",
+							message: `statement node "${node.id}" must have at most 1 exit — it speaks its line and moves on (or ends the call)`,
+						});
+					}
+				}
+				for (const exit of node.exits) {
+					if (exit.target && !ids.has(exit.target)) {
+						ctx.addIssue({
+							code: "custom",
+							message: `node "${node.id}" exit "${exit.name}" targets unknown node "${exit.target}"`,
+						});
+					}
+				}
+			}
+		}),
+
+	/**
+	 * Words/phrases the agent must never say (global, CloseBot "Prohibited
+	 * Words"). Enforced via prompt on every node/agent.
+	 */
+	prohibitedWords: z.array(z.string().min(1)).default([]),
+
+	// Capabilities
+	toolIds: z.array(z.string()).default([]), // must belong to the same project
+	/** Built-in end_call tool: the LLM hangs up after wrapping the conversation. */
+	endCall: z
+		.object({
+			enabled: z.boolean().default(true),
+		})
+		.default({}),
+	transfer: z
+		.object({
+			enabled: z.boolean().default(false),
+			numbers: z.array(z.object({ label: z.string(), e164: z.string() })).default([]),
+		})
+		.optional(),
+	voicemail: z
+		.object({
+			detect: z.boolean().default(true),
+			onVoicemail: z.enum(["hangup", "leave_message"]).default("hangup"),
+			message: z.string().optional(),
+		})
+		.optional(),
+
+	// Compliance (engine-enforced, not prompt-enforced)
+	compliance: z
+		.object({
+			aiDisclosure: z.boolean().default(true),
+			disclosureText: z.string().optional(),
+			record: z.boolean().default(false),
+			recordingConsentPrompt: z.string().optional(),
+		})
+		.default({}),
+
+	// Post-call
+	postCall: z
+		.object({
+			summarize: z.boolean().default(true),
+			/** Named fields + extraction instructions, e.g. { appointment_scheduled: "true/false…" } */
+			extract: z.record(z.string()).optional(),
+		})
+		.default({}),
+});
+
+export type AgentConfigT = z.infer<typeof AgentConfig>;
+
+/** Partial version for PATCH — validated after merging over the stored config. */
+export const AgentConfigPatch = AgentConfig.partial();
+
+/**
+ * Interpolate {{variables}} into instructions/greeting — how per-call context
+ * enters without per-call configs (spec §5). Unknown placeholders are left
+ * intact so a missing variable is visible in transcripts rather than silent.
+ */
+export function interpolate(template: string, variables: Record<string, string>): string {
+	return template.replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (whole, name: string) =>
+		Object.hasOwn(variables, name) ? variables[name]! : whole,
+	);
+}

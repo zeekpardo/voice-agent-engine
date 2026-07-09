@@ -1,0 +1,22 @@
+packages:
+  - "kit"
+  - "worker"
+
+allowBuilds:
+  '@ffmpeg-installer/darwin-arm64': true
+  '@livekit/local-inference': true
+  better-sqlite3: true
+  esbuild: true
+  protobufjs: true
+  # sharp ships prebuilt platform binaries (@img/*); its source build fails and is unnecessary.
+  sharp: false
+
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild
+  - "@livekit/rtc-node"
+  - protobufjs
+  - "@livekit/local-inference"
+  - "@ffmpeg-installer/darwin-arm64"
+
+verifyDepsBeforeRun: false
