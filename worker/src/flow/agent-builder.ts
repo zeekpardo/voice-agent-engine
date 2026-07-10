@@ -1,0 +1,230 @@
+import { llm, voice } from "@livekit/agents";
+import { reportEvent } from "../gateway.js";
+import { buildTools } from "../tools.js";
+import type { FlowRuntimeContext } from "./context.js";
+import type { ObjectivesTracker, ResolvedTarget } from "./objectives.js";
+
+/**
+ * Per-node agent assembly. A flow runs as a graph of small agents — one per
+ * agent node, each with its own stage instructions and gated tools — connected
+ * by exit tools that hand the session off to the next node (chat context
+ * carried over, the previous node's prompt dropped).
+ */
+
+// Same slug scheme as packages/shared/src/slugify.ts (used by
+// src/lib/agent-config.ts) — duplicated here on purpose: `lk agent deploy`
+// builds this worker's Docker image from the worker/ directory alone, so it
+// has no access to sibling workspace packages. Keep this in sync by hand if
+// the scheme ever changes.
+const sanitize = (s: string) =>
+	s
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "_")
+		.replace(/^_+|_+$/g, "");
+
+export interface AgentBuilder {
+	buildFlowAgent(nodeId: string, chatCtx?: llm.ChatContext): voice.Agent;
+}
+
+export interface AgentBuilderDeps {
+	resolveTarget(target: string | undefined): Promise<ResolvedTarget>;
+	runTransfer(nodeId: string): never;
+	/** The objectives tracker is constructed after this builder (it depends on
+	 * buildFlowAgent), so it is reached lazily from onEnter. */
+	getObjectivesTracker(): ObjectivesTracker;
+}
+
+export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDeps): AgentBuilder {
+	const { flow, nodesById, dispatch, bundle } = ctx;
+	const { resolveTarget, runTransfer, getObjectivesTracker } = deps;
+
+	/**
+	 * Shared tail of every exit tool (regular exits and scenario exits):
+	 * resolve the target through routers/statements, then hand off, hang up, or
+	 * let an already-scheduled post-speech hangup run its course.
+	 */
+	const followTarget = async (
+		target: string | undefined,
+		runCtx: voice.RunContext,
+	): Promise<string | llm.AgentHandoff> => {
+		// Routers/statements between here and the next agent node are evaluated
+		// inline (routers: one LLM pass; statements: a queued say).
+		const resolved = await resolveTarget(target);
+		if (resolved.kind === "end") {
+			// Abort-tolerant: caller may disconnect mid-playout (see end_call).
+			await runCtx.waitForPlayout().catch(() => {});
+			await ctx.hangUp("flow_complete");
+			return "call ended";
+		}
+		if (resolved.kind === "end_after_speech") {
+			// A terminal statement was queued and will hang up after playout —
+			// do NOT hang up (or await playout) here: awaiting a queued speech
+			// from inside a tool execution risks the drain deadlock.
+			return "call ending";
+		}
+		if (resolved.kind === "transfer") {
+			return runTransfer(resolved.nodeId);
+		}
+		const nextCtx = runCtx.session.currentAgent.chatCtx.copy({
+			excludeInstructions: true,
+		});
+		return llm.handoff({
+			agent: buildFlowAgent(resolved.id, nextCtx),
+			returns: `Moved to stage "${nodesById.get(resolved.id)?.name ?? resolved.id}".`,
+		});
+	};
+
+	const buildFlowAgent = (nodeId: string, chatCtx?: llm.ChatContext): voice.Agent => {
+		const node = nodesById.get(nodeId);
+		if (!node) throw new Error(`flow node "${nodeId}" not found`);
+		if (node.kind === "router" || node.kind === "statement" || node.kind === "transfer") {
+			throw new Error(
+				`flow node "${nodeId}" is a ${node.kind} — routers, statements and transfers are evaluated inline via resolveTarget and never become agents`,
+			);
+		}
+
+		const objectives = node.objectives ?? [];
+		const hasObjectives = objectives.length > 0;
+
+		const nodeTools = buildTools(
+			bundle.tools.filter((t) => node.toolIds.includes(t.id as string)),
+			dispatch,
+		);
+		// With objectives, the primary exit (exits[0]) belongs to the
+		// ENGINE — the judge takes it once the data is verified; the model
+		// gets no tool for it (this is what stops eager exits). Secondary
+		// exits ("Wrong number") stay model-callable.
+		const toolExits = hasObjectives ? node.exits.slice(1) : node.exits;
+		// Guards against duplicate exit invocations from this node instance —
+		// e.g. preemptiveGeneration drafting a reply (incl. tool calls) off an
+		// interim transcript, then generating a second, final reply that calls
+		// the same exit tool again once the caller's turn actually ends. Both
+		// calls have real side effects (reportEvent + followTarget/handoff), so
+		// the second one must be a no-op rather than replaying the transition.
+		let exited = false;
+		for (const exit of toolExits) {
+			const target = exit.target;
+			nodeTools[`exit_${sanitize(exit.name)}`] = llm.tool({
+				description: `Take the "${exit.name}" exit: ${exit.description}${
+					target ? "" : " This ends the call — say a brief goodbye first."
+				}`,
+				parameters: ctx.EMPTY_PARAMS,
+				execute: async (_args, { ctx: runCtx }) => {
+					if (exited) return "already handled";
+					exited = true;
+					reportEvent(dispatch.callId, "flow.exit", {
+						node: node.id,
+						exit: exit.name,
+						target: target ?? null,
+					});
+					return followTarget(target, runCtx);
+				},
+			});
+		}
+		// Global scenarios (detect-and-jump): one extra exit per scenario on
+		// every agent node, except a scenario already targeting this node.
+		const scenarios = (flow.scenarios ?? []).filter((s) => s.target !== node.id);
+		for (const scenario of scenarios) {
+			nodeTools[`exit_scenario_${sanitize(scenario.name)}`] = llm.tool({
+				description: `SCENARIO — take this exit IMMEDIATELY if at any point: ${scenario.description}`,
+				parameters: ctx.EMPTY_PARAMS,
+				execute: async (_args, { ctx: runCtx }) => {
+					if (exited) return "already handled";
+					exited = true;
+					reportEvent(dispatch.callId, "flow.exit", {
+						node: node.id,
+						exit: scenario.name,
+						target: scenario.target,
+						scenario: true,
+					});
+					return followTarget(scenario.target, runCtx);
+				},
+			});
+		}
+		if (ctx.endCallEnabled) nodeTools.end_call = ctx.endCallTool;
+
+		const exitNames = toolExits.map((e) => `exit_${sanitize(e.name)}`).join(", ");
+		return voice.Agent.create({
+			id: `node:${node.id}`,
+			// Global job info is written ONCE on the agent and inherited by
+			// every node; the node contributes only its stage instructions.
+			// The transition rules below are what stop the two classic flow
+			// failure modes: closing the conversation at every stage change,
+			// and re-greeting/recapping after each handoff.
+			instructions:
+				ctx.globalInstructions +
+				`\n\n## YOUR CURRENT STAGE\n${ctx.interpolate(node.instructions)}` +
+				(hasObjectives
+					? `\n\n## OBJECTIVES\nIn this stage you must learn the following from the caller, naturally and ONE question at a time:\n${objectives
+							.map(
+								(o) =>
+									`- ${o.description}${
+										o.options ? ` (record as one of: ${o.options.join(", ")})` : ""
+									}${(o.required ?? true) ? "" : " (optional — don't push if they decline)"}`,
+							)
+							.join(
+								"\n",
+							)}\nThe system verifies these automatically as the caller answers and advances the conversation to the next stage on its own — never announce a stage change or rush the caller, and do not save these specific values with tools; they are recorded automatically.`
+					: "") +
+				(toolExits.length > 0
+					? `\n\n## MOVING BETWEEN STAGES\nThis call flows through several stages and you handle ONLY this one. The moment the conversation satisfies an exit condition, call that exit tool (${exitNames}) IMMEDIATELY and SILENTLY. Changing stages is invisible to the caller: do NOT wrap up, do NOT say goodbye or "thanks for your time", do NOT announce a transfer or say you're passing them along — the very same voice simply continues the conversation.`
+					: "") +
+				(scenarios.length > 0
+					? `\n\n## SCENARIOS\nThese scenario exits override your stage goal — call one the moment its condition appears: ${scenarios
+							.map((s) => `exit_scenario_${sanitize(s.name)}`)
+							.join(", ")}.`
+					: "") +
+				"\n\n## CONTINUITY\nThis is ONE continuous conversation. Never greet the caller again or re-introduce yourself after the call has started. Never repeat a question that was already answered — check the conversation before asking. Don't recap earlier answers unless you're confirming a correction. Vary your acknowledgements instead of repeating the same phrase." +
+				ctx.pacingRules +
+				(ctx.endCallEnabled
+					? "\n\nOnly the end_call tool ends the call — moving between stages never ends it. Use end_call solely when the conversation is truly over and you've said goodbye."
+					: "") +
+				ctx.missingNote +
+				ctx.prohibited,
+			chatCtx,
+			llm: node.llm ? ctx.buildLlm(node.llm) : ctx.defaultLlm,
+			// A transfer node upstream switched the "person": this and every
+			// later agent speaks with the post-transfer voice.
+			tts: ctx.state.ttsOverride,
+			tools: nodeTools,
+			onEnter: (agentCtx) => {
+				reportEvent(dispatch.callId, "flow.node", { node: node.id, name: node.name ?? null });
+				// Arm (or disarm) the objective judge for this node. Rebuilt
+				// fresh on every entry — re-entering a node restarts its goals.
+				getObjectivesTracker().arm({
+					id: node.id,
+					objectives,
+					judge: node.judge,
+					primaryExit: { name: node.exits[0]?.name ?? "end", target: node.exits[0]?.target },
+				});
+				// Entry node speech is the greeting (step 8); later nodes open
+				// themselves. Not awaited — awaiting playout inside a
+				// tool-triggered onEnter deadlocks the tool call.
+				if (node.id !== flow.entry) {
+					// If the last thing spoken is an agent question the caller
+					// hasn't answered (an exit fired early, or speech queued
+					// ahead of the handoff), opening this stage would stack a
+					// second question on top of it — stay silent and let the
+					// caller answer; the LLM resumes on their next turn.
+					const lastSpoken = ctx.turns.filter((t) => t.role !== "system").at(-1);
+					if (lastSpoken?.role === "agent" && lastSpoken.text.trim().endsWith("?")) {
+						reportEvent(dispatch.callId, "flow.entry_silent", {
+							node: node.id,
+							pending_question: lastSpoken.text.slice(0, 200),
+						});
+						return;
+					}
+					agentCtx.session.generateReply({
+						instructions:
+							"Continue this same conversation mid-stream — no greeting, no re-introduction, no recap of what was already covered. " +
+							(node.entryInstructions
+								? ctx.interpolate(node.entryInstructions)
+								: "Move naturally to this stage's first question."),
+					});
+				}
+			},
+		});
+	};
+
+	return { buildFlowAgent };
+}
