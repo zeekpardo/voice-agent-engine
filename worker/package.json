@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@livekit/agents": "^1.4.7",
+    "@livekit/noise-cancellation-node": "^0.1.10",
     "dotenv": "^16.4.7",
     "zod": "^3.24.1"
   },

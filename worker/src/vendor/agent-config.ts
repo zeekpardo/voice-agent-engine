@@ -81,12 +81,49 @@ export const AgentConfig = z.object({
 		})
 		.default({}),
 
+	/**
+	 * Audio experience (VOICE channel only — text sessions ignore this block).
+	 * Both toggles default ON: they are kill switches, not opt-ins, so existing
+	 * configs get the improved behavior automatically.
+	 */
+	audio: z
+		.object({
+			/**
+			 * Inbound noise cancellation on the caller's audio (LiveKit Krisp models
+			 * via @livekit/noise-cancellation-node). SIP/telephony legs get
+			 * `TelephonyBackgroundVoiceCancellation`; web legs get
+			 * `BackgroundVoiceCancellation`. Root-cause fix for the line-hiss/echo the
+			 * `interruptionMinWords` hack compensated for. Set false to disable. */
+			noiseCancellation: z.boolean().default(true),
+			/**
+			 * Subtle "thinking" sound played while the agent is generating a reply
+			 * (SDK BackgroundAudioPlayer.thinkingSound, driven by the agent-state
+			 * machine), so slow LLM/tool turns aren't dead air. Set false to disable. */
+			thinkingSound: z.boolean().default(true),
+		})
+		.default({}),
+
 	// Conversation dynamics
 	turnDetection: z
 		.object({
+			/**
+			 * How end-of-turn is decided. `semantic` → LiveKit's cloud end-of-turn
+			 * model (`inference.TurnDetector`, the default). `vad` → voice-activity
+			 * start/stop cues; this is a REAL, working mode in @livekit/agents ≥1.5.0
+			 * because `AgentSession` auto-provisions a bundled `inference.VAD` (Silero,
+			 * served through the same Inference gateway as STT/TTS/LLM) — the worker
+			 * also passes it explicitly. Legacy `mode:"vad"` configs keep parsing and
+			 * now actually function. */
 			mode: z.enum(["vad", "semantic"]).default("semantic"),
 			endpointingMs: z.number().int().positive().default(500),
 			allowInterruptions: z.boolean().default(true),
+			/**
+			 * Minimum recognized words for a barge-in to count as an interruption
+			 * (SDK `turnHandling.interruption.minWords`). 1 filters line-hiss / TTS
+			 * echo false barge-ins while letting real speech interrupt. With telephony
+			 * noise cancellation now on, 2 is a reasonable stricter value; default
+			 * stays 1 to preserve prior behavior. */
+			interruptionMinWords: z.number().int().min(0).max(10).default(1),
 			/** Start LLM+TTS on interim transcript before end-of-turn; draft is
 			 * discarded if the final transcript differs. Cuts response latency. */
 			preemptiveGeneration: z.boolean().default(true),
@@ -546,6 +583,23 @@ export const AgentConfig = z.object({
 			detect: z.boolean().default(true),
 			onVoicemail: z.enum(["hangup", "leave_message"]).default("hangup"),
 			message: z.string().optional(),
+		})
+		.optional(),
+
+	/**
+	 * Call recording (LiveKit Egress). Per-agent opt-in; default disabled.
+	 *
+	 * ENGINE NEUTRALITY: this is a bare on/off switch — NO storage vocabulary
+	 * (bucket, provider, path) lives in the agent document. WHERE a recording
+	 * lands is a gateway deployment concern (S3_* env on the gateway), not
+	 * per-agent config. When enabled, the gateway starts an audio-only
+	 * RoomComposite egress as the session/call starts; when the gateway has no
+	 * storage configured it logs a warning and skips (the call still proceeds).
+	 * Only voice sessions are recorded — text sessions never start egress.
+	 */
+	recording: z
+		.object({
+			enabled: z.boolean().default(false),
 		})
 		.optional(),
 

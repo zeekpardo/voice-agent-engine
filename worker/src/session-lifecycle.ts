@@ -1,4 +1,8 @@
 import { type JobContext, inference, voice } from "@livekit/agents";
+import {
+	BackgroundVoiceCancellation,
+	TelephonyBackgroundVoiceCancellation,
+} from "@livekit/noise-cancellation-node";
 import { type FlowRuntimeState, type Turn, buildTts, inferenceModel } from "./flow/context.js";
 import { type AgentConfig, type DispatchMetadata, reportCompletion, reportEvent } from "./gateway.js";
 
@@ -43,19 +47,81 @@ interface RemoteLike {
 	attributes: Record<string, string>;
 }
 
+/** Outcome of waiting for a participant to go live. `endReason`/`status` are set
+ * only when the leg never went live, so the completion report can distinguish a
+ * busy signal from a plain no-answer (retry logic downstream depends on it). */
+type LiveResult =
+	| { live: true }
+	| { live: false; endReason: string; status: "no_answer" | "failed" };
+
 /**
- * Resolve true once the participant is live: web participants immediately
- * (no sip.callStatus attribute), SIP participants when the callee answers.
- * False on hangup-while-ringing or timeout.
+ * Map a SIP leg that dropped before it was answered to a granular end reason.
+ * LiveKit writes `sip.*` attributes onto the SIP participant; `sip.callStatusCode`
+ * carries the SIP response code and some deployments also surface a textual
+ * `sip.disconnectReason`. We collapse those into the reasons downstream retry
+ * logic understands. `no_answer` stays the catch-all fallback.
+ *
+ * NOTE: this cannot be exercised without a real SIP failure leg (see verify
+ * report); the table below is the code-inspection + logged mapping.
+ *   486 Busy Here / 600 Busy Everywhere          → user_busy      (no_answer)
+ *   403 Forbidden / 603 Decline                  → call_rejected  (no_answer)
+ *   480 Temporarily Unavailable / 408 Timeout    → no_answer      (no_answer)
+ *   404 Not Found / 484 / 485 / 604              → invalid_number (failed)
+ *   5xx (500/502/503/504/…)                      → trunk_failure  (failed)
+ *   anything else / no code                      → no_answer      (no_answer)
+ */
+function sipDisconnectReason(attrs: Record<string, string>): {
+	endReason: string;
+	status: "no_answer" | "failed";
+} {
+	const raw = (attrs["sip.disconnectReason"] ?? "").toLowerCase();
+	if (raw) {
+		if (raw.includes("busy")) return { endReason: "user_busy", status: "no_answer" };
+		if (raw.includes("declin") || raw.includes("reject") || raw.includes("forbidden"))
+			return { endReason: "call_rejected", status: "no_answer" };
+		if (raw.includes("not found") || raw.includes("invalid") || raw.includes("no such"))
+			return { endReason: "invalid_number", status: "failed" };
+		if (raw.includes("unavailable") || raw.includes("no answer") || raw.includes("timeout"))
+			return { endReason: "no_answer", status: "no_answer" };
+	}
+	const code = Number.parseInt(attrs["sip.callStatusCode"] ?? "", 10);
+	if (Number.isFinite(code)) {
+		if (code === 486 || code === 600) return { endReason: "user_busy", status: "no_answer" };
+		if (code === 403 || code === 603) return { endReason: "call_rejected", status: "no_answer" };
+		if (code === 404 || code === 484 || code === 485 || code === 604)
+			return { endReason: "invalid_number", status: "failed" };
+		if (code >= 500 && code < 600) return { endReason: "trunk_failure", status: "failed" };
+		if (code === 480 || code === 408) return { endReason: "no_answer", status: "no_answer" };
+	}
+	return { endReason: "no_answer", status: "no_answer" };
+}
+
+/** True if any remote participant is a SIP/telephony leg (carries `sip.*`
+ * attributes) — the ground-truth signal `waitForSipAnswer` keys off, read up
+ * front so the right noise-cancellation model is chosen at session.start. */
+function roomHasSipParticipant(room: unknown): boolean {
+	const rp = (room as { remoteParticipants?: Map<string, RemoteLike> }).remoteParticipants;
+	if (!rp) return false;
+	for (const p of rp.values()) {
+		if (Object.keys(p.attributes ?? {}).some((k) => k.startsWith("sip."))) return true;
+	}
+	return false;
+}
+
+/**
+ * Resolve `{ live: true }` once the participant is live: web participants
+ * immediately (no sip.callStatus attribute), SIP participants when the callee
+ * answers. On hangup-while-ringing or timeout, resolve `{ live: false }` with a
+ * granular end reason mapped from the SIP disconnect attributes.
  */
 function waitForSipAnswer(
 	ctx: { room: unknown },
 	participant: RemoteLike,
 	timeoutMs: number,
-): Promise<boolean> {
+): Promise<LiveResult> {
 	const status = () => participant.attributes["sip.callStatus"];
-	if (!status()) return Promise.resolve(true); // not SIP (browser participant)
-	if (status() === "active") return Promise.resolve(true);
+	if (!status()) return Promise.resolve({ live: true }); // not SIP (browser participant)
+	if (status() === "active") return Promise.resolve({ live: true });
 
 	const room = ctx.room as {
 		on(event: string, cb: (changed: unknown, p: RemoteLike) => void): void;
@@ -64,17 +130,17 @@ function waitForSipAnswer(
 	return new Promise((resolve) => {
 		const timer = setTimeout(() => {
 			cleanup();
-			resolve(false);
+			resolve({ live: false, endReason: "no_answer", status: "no_answer" });
 		}, timeoutMs);
 		const onAttrs = (_changed: unknown, p: RemoteLike) => {
 			if (p.identity !== participant.identity) return;
 			const s = p.attributes["sip.callStatus"];
 			if (s === "active") {
 				cleanup();
-				resolve(true);
+				resolve({ live: true });
 			} else if (s === "hangup") {
 				cleanup();
-				resolve(false);
+				resolve({ live: false, ...sipDisconnectReason(p.attributes) });
 			}
 		};
 		const cleanup = () => {
@@ -101,12 +167,16 @@ interface ChannelRuntime {
 	/** Start the AgentSession with channel-appropriate room I/O options. */
 	start(agent: voice.Agent): Promise<void>;
 	/** Wait until the human is live (voice: participant + SIP answer; text:
-	 * participant joined). False → no answer / abandoned before going live. */
-	waitUntilLive(): Promise<boolean>;
+	 * participant joined). `{ live: false }` → no answer / abandoned before going
+	 * live, carrying a granular end reason for the completion report. */
+	waitUntilLive(): Promise<LiveResult>;
 	/** Egress a committed agent turn. voice: no-op (TTS already spoke it); text:
 	 * publish the full message on the lk.chat topic. Called from the shared
 	 * ConversationItemAdded listener so the greeting and every reply flow out. */
 	emitAgentTurn(text: string): void;
+	/** Release channel-owned resources at session close (voice: the thinking-sound
+	 * BackgroundAudioPlayer). Optional — text has none. */
+	dispose?(): Promise<void>;
 }
 
 /**
@@ -114,8 +184,13 @@ interface ChannelRuntime {
  * its go-live SIP-answer wait, and TTS-drives-egress (so emitAgentTurn is a
  * no-op). Preserved byte-for-byte from the pre-Phase-6 startSession.
  */
-function buildVoiceChannel(ctx: JobContext, config: AgentConfig): ChannelRuntime {
+function buildVoiceChannel(ctx: JobContext, config: AgentConfig, isInbound: boolean): ChannelRuntime {
 	const sttModel = inferenceModel(config.stt.model, config.stt.provider, "xai/stt-1");
+	// vad mode is a REAL mode in @livekit/agents ≥1.5.0: AgentSession auto-
+	// provisions a bundled inference.VAD (Silero, via the Inference gateway). We
+	// pass it explicitly so the wiring is self-documenting and not reliant on the
+	// auto-provision behavior. semantic mode keeps the cloud end-of-turn model.
+	const useVad = config.turnDetection.mode === "vad";
 	const session = new voice.AgentSession({
 		// xAI STT auto-detects (and code-switches) languages mid-call; pinning
 		// it to the agent's language forces monolingual decoding — Spanish
@@ -126,28 +201,76 @@ function buildVoiceChannel(ctx: JobContext, config: AgentConfig): ChannelRuntime
 			...(sttModel.startsWith("xai/") ? {} : { language: config.language }),
 		}),
 		tts: buildTts(config.tts),
+		...(useVad ? { vad: new inference.VAD() } : {}),
 		turnHandling: {
-			// semantic → LiveKit's end-of-turn model; vad → VAD start/stop cues.
-			turnDetection:
-				config.turnDetection.mode === "semantic" ? new inference.TurnDetector() : "vad",
+			// semantic → LiveKit's end-of-turn model; vad → Silero VAD start/stop cues.
+			turnDetection: useVad ? "vad" : new inference.TurnDetector(),
 			endpointing: { minDelay: config.turnDetection.endpointingMs },
 			// minWords: 0 (SDK default) lets any 500ms+ noise burst — line hiss,
 			// SIP echo of the agent's own TTS — register as a barge-in with no
 			// recognized speech, cutting the agent off mid-sentence. Requiring at
 			// least one recognized word filters that out while still letting real
-			// speech interrupt immediately.
-			interruption: { enabled: config.turnDetection.allowInterruptions, minWords: 1 },
+			// speech interrupt immediately; configurable now that telephony noise
+			// cancellation removes most of the root cause.
+			interruption: {
+				enabled: config.turnDetection.allowInterruptions,
+				minWords: config.turnDetection.interruptionMinWords,
+				// False-interruption recovery: if the barge-in yields no user
+				// transcript within this window (a cough, background noise), resume
+				// the agent's turn instead of leaving it permanently cut off. These
+				// match the SDK defaults but are set explicitly so the behavior is
+				// intentional and tunable.
+				falseInterruptionTimeout: 2000,
+				resumeFalseInterruption: true,
+			},
 			// Draft the reply (LLM + first TTS chunk) while the caller is still
 			// finishing their sentence; discard if the final transcript differs.
 			preemptiveGeneration: { enabled: config.turnDetection.preemptiveGeneration !== false },
 		},
 	});
 
+	// Subtle thinking sound (SDK-native, driven by the agent-state machine) so a
+	// slow LLM/tool turn isn't dead air. Voice channel only; created at start and
+	// released in dispose(). Default ON, kill switch via config.audio.thinkingSound.
+	const thinkingSoundEnabled = config.audio?.thinkingSound !== false;
+	let bgAudio: voice.BackgroundAudioPlayer | null = null;
+
 	const noAnswerMs = (config.timeouts.noAnswerSeconds ?? 25) * 1000;
 	return {
 		session,
 		idleTimeoutSeconds: config.timeouts.silenceHangupSeconds,
-		start: (agent) => session.start({ agent, room: ctx.room }).then(() => undefined),
+		start: async (agent) => {
+			// Noise cancellation on the caller's inbound audio. Telephony model for
+			// SIP legs (inbound is always SIP; outbound detected via the SIP
+			// participant), the general model for web legs. Kill switch: audio.noiseCancellation.
+			const ncEnabled = config.audio?.noiseCancellation !== false;
+			const telephony = isInbound || roomHasSipParticipant(ctx.room);
+			const noiseCancellation = !ncEnabled
+				? undefined
+				: telephony
+					? TelephonyBackgroundVoiceCancellation()
+					: BackgroundVoiceCancellation();
+			console.log(
+				`[session] voice options: turnDetection=${config.turnDetection.mode} interruptionMinWords=${config.turnDetection.interruptionMinWords} falseInterruptionTimeout=2000ms noiseCancellation=${ncEnabled ? (telephony ? "telephony" : "background") : "off"} thinkingSound=${thinkingSoundEnabled ? "on" : "off"}`,
+			);
+			await session.start({
+				agent,
+				room: ctx.room,
+				...(noiseCancellation ? { inputOptions: { noiseCancellation } } : {}),
+			});
+			if (thinkingSoundEnabled) {
+				try {
+					bgAudio = new voice.BackgroundAudioPlayer({
+						thinkingSound: { source: voice.BuiltinAudioClip.KEYBOARD_TYPING2, volume: 0.4 },
+					});
+					await bgAudio.start({ room: ctx.room, agentSession: session });
+				} catch (err) {
+					// Non-fatal: a missing audio track must never fail the call.
+					console.error("[session] thinking-sound start failed", err);
+					bgAudio = null;
+				}
+			}
+		},
 		waitUntilLive: async () => {
 			// Wait for the human before greeting: browsers join within seconds;
 			// outbound SIP participants exist while ringing, so also wait for the
@@ -156,10 +279,15 @@ function buildVoiceChannel(ctx: JobContext, config: AgentConfig): ChannelRuntime
 				ctx.waitForParticipant(),
 				new Promise<null>((r) => setTimeout(() => r(null), noAnswerMs + 20_000)),
 			]);
-			return remote ? await waitForSipAnswer(ctx, remote, noAnswerMs) : false;
+			if (!remote) return { live: false, endReason: "no_answer", status: "no_answer" };
+			return await waitForSipAnswer(ctx, remote, noAnswerMs);
 		},
 		// Voice replies are spoken by TTS — nothing extra to emit.
 		emitAgentTurn: () => {},
+		dispose: async () => {
+			await bgAudio?.close().catch((err) => console.error("[session] thinking-sound close failed", err));
+			bgAudio = null;
+		},
 	};
 }
 
@@ -213,14 +341,19 @@ function buildTextChannel(ctx: JobContext, config: AgentConfig): ChannelRuntime 
 				ctx.waitForParticipant(),
 				new Promise<null>((r) => setTimeout(() => r(null), noAnswerMs)),
 			]);
-			return !!remote;
+			return remote ? { live: true } : { live: false, endReason: "no_answer", status: "no_answer" };
 		},
 		emitAgentTurn: publish,
 	};
 }
 
-function buildChannel(channel: "voice" | "text", ctx: JobContext, config: AgentConfig): ChannelRuntime {
-	return channel === "text" ? buildTextChannel(ctx, config) : buildVoiceChannel(ctx, config);
+function buildChannel(
+	channel: "voice" | "text",
+	ctx: JobContext,
+	config: AgentConfig,
+	isInbound: boolean,
+): ChannelRuntime {
+	return channel === "text" ? buildTextChannel(ctx, config) : buildVoiceChannel(ctx, config, isInbound);
 }
 
 export interface SessionLifecycleDeps {
@@ -255,7 +388,7 @@ const DEFAULT_DISCLOSURE = "Just so you know, you're speaking with an A.I. assis
 export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	const { job: ctx, config, dispatch, turns, state, agent, greeting } = deps;
 
-	const channel = buildChannel(deps.channel, ctx, config);
+	const channel = buildChannel(deps.channel, ctx, config, deps.isInbound);
 	const { session } = channel;
 	// Publish the session so the flow modules' lazy ctx.session getter resolves.
 	state.session = session;
@@ -380,6 +513,8 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 		// job shutdown (an SDK crash after close previously lost the whole
 		// transcript). complete() is idempotent.
 		void complete().catch((err) => console.error("completion flush failed", err));
+		// Release channel-owned resources (voice thinking-sound player).
+		void channel.dispose?.().catch((err) => console.error("channel dispose failed", err));
 	});
 	ctx.addShutdownCallback(complete);
 
@@ -413,12 +548,15 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	// start with text-only I/O + participant wait).
 	await channel.start(agent);
 
-	const answered = await channel.waitUntilLive();
-	if (!answered) {
-		completionStatus = "no_answer";
-		endReason = "no_answer";
+	const live = await channel.waitUntilLive();
+	if (!live.live) {
+		// Granular no-answer/failure reason (busy, rejected, invalid number, trunk
+		// failure) mapped from the SIP disconnect attributes; plain "no_answer" for
+		// web/abandoned. Threaded into the completion report + call.failed/completed.
+		completionStatus = live.status;
+		endReason = live.endReason;
 		await complete();
-		await state.hangUp("no_answer");
+		await state.hangUp(live.endReason);
 		return;
 	}
 
