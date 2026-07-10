@@ -1,0 +1,323 @@
+import { llm, voice } from "@livekit/agents";
+import { type DispatchMetadata, type FlowObjective, type ToolDef, reportEvent } from "../gateway.js";
+import { invokeTool } from "../tools.js";
+
+/**
+ * Objective-driven nodes (voiceagent-engine/objectives-and-conversation-spec.md).
+ * The conversational LLM only talks; after every caller turn a cheap judge
+ * pass rates each unmet objective ASYNC (never delaying speech), auto-writes
+ * CRM fields via update_contact, and the ENGINE takes the node's primary
+ * exit once every required objective is verified.
+ *
+ * Extracted from main.ts's flow branch: functions here take an explicit
+ * ObjectivesDeps context instead of capturing session state via closure —
+ * the pattern the upcoming full main.ts split (T3b) will follow.
+ */
+
+/** Minimal transcript turn shape the judge reads from. */
+export interface ObjectiveTurn {
+	role: "agent" | "user" | "system";
+	text: string;
+}
+
+/** Where an exit lands after following routers/statements — owned by the
+ * flow's target resolution in main.ts, re-exported here since the objectives
+ * transition consumes it. */
+export type ResolvedTarget =
+	| { kind: "agent"; id: string }
+	| { kind: "end" }
+	| { kind: "end_after_speech" }
+	| { kind: "transfer"; nodeId: string };
+
+interface ObjectiveProgress {
+	met: boolean;
+	rating?: number;
+	answer?: string;
+	/** Caller turns spent while this was the first unmet objective. */
+	attempts: number;
+	/** maxAttempts exhausted — stops gating the exit, stays unmet. */
+	skipped: boolean;
+}
+
+interface ObjectiveRuntime {
+	nodeId: string;
+	exitName: string;
+	target?: string;
+	judge?: { model: string; temperature?: number };
+	objectives: FlowObjective[];
+	state: Map<string, ObjectiveProgress>;
+	judging: boolean;
+	rerun: boolean;
+	transitioning: boolean;
+}
+
+/**
+ * Everything the objectives subsystem needs from the surrounding session —
+ * threaded explicitly rather than captured via closure. Deliberately narrow:
+ * only what judging/writing/transitioning actually touch.
+ */
+export interface ObjectivesDeps {
+	dispatch: DispatchMetadata;
+	/** Live transcript buffer (main.ts's `turns`); read-only here. */
+	turns: ObjectiveTurn[];
+	session: voice.AgentSession;
+	buildLlm: (over?: {
+		model?: string;
+		temperature?: number;
+		maxTokens?: number;
+	}) => { chat(opts: { chatCtx: llm.ChatContext }): { collect(): Promise<{ text: string }> } };
+	updateContactDef: ToolDef | undefined;
+	/** Follows an exit target through routers/statements/set_field/modify_tags
+	 * nodes to the next agent (or end). Owned by main.ts's flow branch. */
+	resolveTarget: (target: string | undefined) => Promise<ResolvedTarget>;
+	/** Builds (or rebuilds) the voice.Agent for a flow node, carrying over
+	 * chat context. Owned by main.ts's flow branch. */
+	buildFlowAgent: (nodeId: string, chatCtx?: llm.ChatContext) => voice.Agent;
+	/** Starts a simulated warm-transfer sequence for a transfer node. */
+	startTransfer: (nodeId: string) => void;
+	/** Agent-initiated hangup (flushes + tears down the room). */
+	hangUp: (reason: string) => Promise<void>;
+	/** True once call completion has already been reported. */
+	isCompleted: () => boolean;
+}
+
+/** Node-shaped input to `arm` — only the fields the tracker needs. */
+export interface ObjectiveNodeInfo {
+	id: string;
+	objectives: FlowObjective[];
+	judge?: { model: string; temperature?: number };
+	/** The node's primary exit (exits[0]) — the one the engine takes once
+	 * every required objective is verified. */
+	primaryExit: { name: string; target?: string };
+}
+
+export interface ObjectivesTracker {
+	/** Call from a flow node's onEnter to (re)arm the judge for that node, or
+	 * disarm it (pass objectives: []) for nodes with no objectives. Rebuilt
+	 * fresh on every entry — re-entering a node restarts its goals. */
+	arm(node: ObjectiveNodeInfo): void;
+	/** Call after every recorded caller turn (role === "user" with text). */
+	onUserTurn(): void;
+}
+
+// Strict default: on a voice call a wrong "met" audibly advances (or ends)
+// the conversation. Per-objective `sensitivity` overrides it.
+const OBJECTIVE_RATING_THRESHOLD = 90;
+const objectiveThreshold = (o: FlowObjective): number =>
+	Math.min(100, Math.max(10, o.sensitivity ?? OBJECTIVE_RATING_THRESHOLD));
+const OBJECTIVE_JUDGE_SYSTEM =
+	'You evaluate whether data-collection objectives for a phone call have been satisfied by the conversation so far. Respond with ONLY a JSON object — no prose, no code fences — of the form {"checks":[{"key":"<objective key>","rating":<0-100>,"answer":"<extracted value or empty string>"}]}. Include one check per objective. rating is your confidence that the CALLER explicitly provided the information (100 = clearly provided, 0 = not provided at all). Extract answer from what the caller actually said. NEVER invent or assume a value the caller did not state; if the information was not provided, rating must be low and answer empty. When an objective lists allowed values, answer must be exactly one of them, chosen from what the caller said. Some objectives are CONDITIONAL ("if X, …"): when the conversation clearly shows the condition does NOT apply, the objective is satisfied — rate it 100 with answer "N/A".';
+
+/**
+ * Idle = agent finished speaking its current reply. Bounded: a stuck state
+ * must not wedge the flow, so transition anyway after timeoutMs.
+ */
+function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promise<void> {
+	const state = session.agentState;
+	if (state === "listening" || state === "idle" || state === "initializing") {
+		return Promise.resolve();
+	}
+	return new Promise((resolve) => {
+		const finish = () => {
+			clearTimeout(timer);
+			session.off(voice.AgentSessionEventTypes.AgentStateChanged, onState);
+			resolve();
+		};
+		const timer = setTimeout(finish, timeoutMs);
+		const onState = (ev: voice.AgentStateChangedEvent) => {
+			if (ev.newState === "listening" || ev.newState === "idle") finish();
+		};
+		session.on(voice.AgentSessionEventTypes.AgentStateChanged, onState);
+	});
+}
+
+export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
+	const { dispatch, turns, session, buildLlm, updateContactDef, resolveTarget, buildFlowAgent, startTransfer, hangUp, isCompleted } =
+		deps;
+	const defaultJudgeLlm = buildLlm({ model: "grok-4-fast", temperature: 0, maxTokens: 400 });
+
+	let activeObjectives: ObjectiveRuntime | null = null;
+
+	const writeObjectiveField = (objective: FlowObjective, answer: string): void => {
+		if (!objective.field || !answer) return;
+		if (!updateContactDef) {
+			console.warn(
+				`flow: objective "${objective.key}" wants field "${objective.field}" but no update_contact tool is registered`,
+			);
+			return;
+		}
+		// Snap to the exact picklist option when one matches case-insensitively.
+		const option = objective.options?.find((v) => v.toLowerCase() === answer.toLowerCase());
+		void invokeTool(updateContactDef, dispatch, {
+			field_name: objective.field,
+			value: option ?? answer,
+		}).catch((err) => console.error(`flow: objective field write failed (${objective.field})`, err));
+	};
+
+	const runObjectiveJudge = async (rt: ObjectiveRuntime): Promise<void> => {
+		const unmet = rt.objectives.filter((o) => {
+			const p = rt.state.get(o.key);
+			return p && !p.met && !p.skipped;
+		});
+		if (unmet.length === 0) return;
+		const transcript = turns
+			.filter((t) => t.role !== "system")
+			.slice(-40)
+			.map((t) => `${t.role === "user" ? "caller" : "agent"}: ${t.text}`)
+			.join("\n");
+
+		const evalCtx = new llm.ChatContext();
+		evalCtx.addMessage({ role: "system", content: OBJECTIVE_JUDGE_SYSTEM });
+		evalCtx.addMessage({
+			role: "user",
+			content: `Objectives:\n${unmet
+				.map(
+					(o) =>
+						`- key "${o.key}": ${o.description}${
+							o.options ? ` — allowed values: ${o.options.map((v) => `"${v}"`).join(", ")}` : ""
+						}`,
+				)
+				.join("\n")}\n\nConversation transcript:\n${transcript}`,
+		});
+
+		const judgeLlm = rt.judge ? buildLlm({ temperature: 0, maxTokens: 400, ...rt.judge }) : defaultJudgeLlm;
+		const res = await judgeLlm.chat({ chatCtx: evalCtx }).collect();
+		const text = res.text
+			.trim()
+			.replace(/^```(?:json)?\s*/i, "")
+			.replace(/\s*```$/, "");
+		let parsed: { checks?: { key?: string; rating?: number; answer?: string }[] };
+		try {
+			parsed = JSON.parse(text) as typeof parsed;
+		} catch {
+			console.error(`flow: objective judge returned unparseable output: ${text.slice(0, 200)}`);
+			return;
+		}
+
+		for (const check of parsed.checks ?? []) {
+			const objective = rt.objectives.find((o) => o.key === check.key);
+			if (!objective) continue;
+			const progress = rt.state.get(objective.key);
+			if (!progress || progress.met) continue;
+			const rating = Number(check.rating ?? 0);
+			if (!(rating >= objectiveThreshold(objective))) continue;
+			progress.met = true;
+			progress.rating = rating;
+			progress.answer = typeof check.answer === "string" ? check.answer.trim() : "";
+			reportEvent(dispatch.callId, "flow.objective", {
+				node: rt.nodeId,
+				key: objective.key,
+				rating,
+				answer: progress.answer.slice(0, 200),
+			});
+			// "N/A" = a conditional objective whose condition didn't apply —
+			// satisfied, but nothing to write to the CRM.
+			if (progress.answer && progress.answer.toUpperCase() !== "N/A") {
+				writeObjectiveField(objective, progress.answer);
+			}
+		}
+
+		// Max attempts (CloseBot semantics): objectives are pursued roughly in
+		// order, so each caller turn that leaves the FIRST live objective unmet
+		// burns one attempt on it. Exhausted → it stops gating the exit
+		// (skipped, stays unmet) so a dodging caller can't stall the flow
+		// forever.
+		const focus = rt.objectives.find((o) => {
+			const p = rt.state.get(o.key);
+			return p && !p.met && !p.skipped;
+		});
+		if (focus?.maxAttempts) {
+			const progress = rt.state.get(focus.key)!;
+			progress.attempts += 1;
+			if (progress.attempts >= focus.maxAttempts) {
+				progress.skipped = true;
+				reportEvent(dispatch.callId, "flow.objective_skipped", {
+					node: rt.nodeId,
+					key: focus.key,
+					attempts: progress.attempts,
+				});
+			}
+		}
+	};
+
+	const maybeCompleteObjectives = (rt: ObjectiveRuntime): void => {
+		if (rt.transitioning || activeObjectives !== rt) return;
+		const pending = rt.objectives.filter((o) => {
+			const p = rt.state.get(o.key);
+			return (o.required ?? true) && p && !p.met && !p.skipped;
+		});
+		if (pending.length > 0) return;
+		rt.transitioning = true;
+		reportEvent(dispatch.callId, "flow.objectives_met", { node: rt.nodeId });
+		void (async () => {
+			// Never cut the agent off mid-sentence: transition at the next turn
+			// boundary (agent back to listening).
+			await waitForAgentIdle(session, 15_000);
+			// A scenario/secondary exit (or hangup) may have moved the call on.
+			if (isCompleted() || activeObjectives !== rt) return;
+			if (session.currentAgent.id !== `node:${rt.nodeId}`) return;
+			reportEvent(dispatch.callId, "flow.exit", {
+				node: rt.nodeId,
+				exit: rt.exitName,
+				target: rt.target ?? null,
+				via: "objectives",
+			});
+			activeObjectives = null;
+			const resolved = await resolveTarget(rt.target);
+			if (resolved.kind === "agent") {
+				const nextCtx = session.currentAgent.chatCtx.copy({ excludeInstructions: true });
+				session.updateAgent(buildFlowAgent(resolved.id, nextCtx));
+			} else if (resolved.kind === "end") {
+				await hangUp("flow_complete");
+			} else if (resolved.kind === "transfer") {
+				startTransfer(resolved.nodeId);
+			}
+			// end_after_speech: the terminal statement queued its own hangup.
+		})().catch((err) => console.error("flow: objective transition failed", err));
+	};
+
+	return {
+		arm(node: ObjectiveNodeInfo): void {
+			// Rebuilt fresh on every entry — re-entering a node restarts its
+			// goals.
+			activeObjectives =
+				node.objectives.length > 0
+					? {
+							nodeId: node.id,
+							exitName: node.primaryExit.name,
+							target: node.primaryExit.target,
+							judge: node.judge,
+							objectives: node.objectives,
+							state: new Map(node.objectives.map((o) => [o.key, { met: false, attempts: 0, skipped: false }])),
+							judging: false,
+							rerun: false,
+							transitioning: false,
+						}
+					: null;
+		},
+		onUserTurn(): void {
+			const rt = activeObjectives;
+			if (!rt || rt.transitioning) return;
+			if (rt.judging) {
+				// A newer caller turn arrived mid-judge — re-run once it finishes so
+				// the verdict always covers the latest turn.
+				rt.rerun = true;
+				return;
+			}
+			void (async () => {
+				do {
+					rt.rerun = false;
+					rt.judging = true;
+					try {
+						await runObjectiveJudge(rt);
+					} catch (err) {
+						console.error("flow: objective judge pass failed", err);
+					} finally {
+						rt.judging = false;
+					}
+				} while (rt.rerun && activeObjectives === rt && !rt.transitioning);
+				maybeCompleteObjectives(rt);
+			})();
+		},
+	};
+}
