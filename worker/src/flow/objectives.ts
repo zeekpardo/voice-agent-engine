@@ -190,8 +190,47 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 		}).catch((err) => console.error(`flow: objective field write failed (${objective.field})`, err));
 	};
 
+	/**
+	 * Aggregate objectives (Phase 5b — CloseBot's get_full_address). An aggregate
+	 * has no own judge question: it completes automatically once every one of its
+	 * parts is met. Its answer is the parts' answers joined in aggregateOf order
+	 * (space-separated), then its `field` write fires as usual. Called after every
+	 * judge pass and after arm()'s skipIfKnown pass.
+	 */
+	const completeAggregates = (rt: ObjectiveRuntime): void => {
+		for (const agg of rt.objectives) {
+			if (!agg.aggregateOf?.length) continue;
+			const progress = rt.state.get(agg.key);
+			if (!progress || progress.met || progress.skipped) continue;
+			// Every part must exist (schema-guarded) and be met.
+			const partStates = agg.aggregateOf.map((k) => rt.state.get(k));
+			if (partStates.some((p) => !p || !p.met)) continue;
+			const answer = agg.aggregateOf
+				.map((k) => (rt.state.get(k)?.answer ?? "").trim())
+				.filter((a) => a && a.toUpperCase() !== "N/A")
+				.join(" ");
+			progress.met = true;
+			progress.rating = 100;
+			progress.answer = answer;
+			reportEvent(dispatch.callId, "flow.objective", {
+				node: rt.nodeId,
+				key: agg.key,
+				rating: 100,
+				answer: answer.slice(0, 200),
+				source: "aggregate",
+			});
+			if (answer && answer.toUpperCase() !== "N/A") {
+				writeObjectiveField(agg, answer);
+			}
+			console.log(`flow: aggregate objective "${agg.key}" completed -> "${answer}"`);
+		}
+	};
+
 	const runObjectiveJudge = async (rt: ObjectiveRuntime): Promise<void> => {
+		// Aggregate objectives have no own judge question — they complete from their
+		// parts (completeAggregates), so they are excluded from the unmet list.
 		const unmet = rt.objectives.filter((o) => {
+			if (o.aggregateOf?.length) return false;
 			const p = rt.state.get(o.key);
 			return p && !p.met && !p.skipped;
 		});
@@ -263,6 +302,7 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 		// (skipped, stays unmet) so a dodging caller can't stall the flow
 		// forever.
 		const focus = rt.objectives.find((o) => {
+			if (o.aggregateOf?.length) return false;
 			const p = rt.state.get(o.key);
 			return p && !p.met && !p.skipped;
 		});
@@ -278,6 +318,9 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 				});
 			}
 		}
+
+		// Roll any now-satisfiable aggregates up from their parts.
+		completeAggregates(rt);
 	};
 
 	const maybeCompleteObjectives = (rt: ObjectiveRuntime): void => {
@@ -359,6 +402,8 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 				console.log(`flow: objective "${o.key}" met from known contact field "${o.field}" (skipIfKnown)`);
 			}
 			activeObjectives = rt;
+			// An aggregate whose parts were all satisfied by skipIfKnown completes now.
+			completeAggregates(rt);
 			// If every required objective was already known, advance immediately
 			// (guards + idle-wait live in maybeCompleteObjectives).
 			maybeCompleteObjectives(rt);

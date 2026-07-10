@@ -33,6 +33,9 @@ export interface DispatchMetadata {
 	/** Per-call known-contact data (Phase 1). Optional: old dispatches omit it.
 	 * Opaque generic key/label/value — the engine never reads CRM meaning into it. */
 	contactState?: ContactStateEntryT[];
+	/** Per-call CRM tag names (Phase 5b). Optional: old dispatches omit it. Seeds
+	 * the worker's in-memory tag set for tag-driven exit gating. Opaque strings. */
+	contactTags?: string[];
 }
 
 /**

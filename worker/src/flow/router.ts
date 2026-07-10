@@ -1,7 +1,7 @@
 import { llm } from "@livekit/agents";
 import { reportEvent } from "../gateway.js";
 import { invokeTool } from "../tools.js";
-import { type FlowRuntimeContext, upsertContactState } from "./context.js";
+import { type FlowRuntimeContext, tagRulesSatisfied, upsertContactState } from "./context.js";
 import type { ResolvedTarget } from "./objectives.js";
 
 /**
@@ -98,18 +98,36 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 					kind: "modify_tags",
 				});
 				const add = node.modifyTags?.add ?? [];
+				const remove = node.modifyTags?.remove ?? [];
 				const tagWriteDef = ctx.resolveToolDef(node.modifyTags?.toolId, ctx.tagWriteDef);
-				if (add.length > 0 && tagWriteDef) {
+				if (add.length > 0) {
 					for (const tag of add) {
-						void invokeTool(tagWriteDef, dispatch, { tag }).catch((err) =>
-							console.error(`flow: modify_tags add "${tag}" failed`, err),
-						);
+						// Update the in-memory tag set (Phase 5b) regardless of whether a
+						// write tool is registered — exit gating is deterministic and local.
+						ctx.contactTags.add(tag);
+						if (tagWriteDef) {
+							void invokeTool(tagWriteDef, dispatch, { tag }).catch((err) =>
+								console.error(`flow: modify_tags add "${tag}" failed`, err),
+							);
+						}
 					}
 				}
-				if ((node.modifyTags?.remove ?? []).length > 0) {
-					console.warn(
-						`flow: modify_tags node "${node.id}" requested tag removal, which is not wired yet`,
-					);
+				// Tag removal (Phase 5b): invoke the config-designated removal tool
+				// (config.tagRemoveToolId) and prune the in-memory tag set.
+				if (remove.length > 0) {
+					const tagRemoveDef = ctx.tagRemoveDef;
+					for (const tag of remove) {
+						ctx.contactTags.delete(tag);
+						if (tagRemoveDef) {
+							void invokeTool(tagRemoveDef, dispatch, { tag }).catch((err) =>
+								console.error(`flow: modify_tags remove "${tag}" failed`, err),
+							);
+						} else {
+							console.warn(
+								`flow: modify_tags node "${node.id}" wants to remove "${tag}" but no removal tool (config.tagRemoveToolId) is registered`,
+							);
+						}
+					}
 				}
 				const exit = node.exits[0];
 				reportEvent(dispatch.callId, "flow.exit", {
@@ -154,9 +172,19 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 				kind: "router",
 			});
 
+			// Tag-gated exits (Phase 5b) are skipped as router target candidates.
+			// Fall back to the full list only if gating leaves nothing to pick.
+			const availableExits = node.exits.filter((e) => tagRulesSatisfied(e.tagRules, ctx.contactTags));
+			if (availableExits.length < node.exits.length) {
+				reportEvent(dispatch.callId, "flow.exits_gated", {
+					node: node.id,
+					gated: node.exits.filter((e) => !tagRulesSatisfied(e.tagRules, ctx.contactTags)).map((e) => e.name),
+				});
+			}
+			const routableExits = availableExits.length > 0 ? availableExits : node.exits;
 			const fallbackExit =
-				node.exits.find((e) => ["otherwise", "none", "default"].includes(e.name.toLowerCase())) ??
-				node.exits[node.exits.length - 1]!;
+				routableExits.find((e) => ["otherwise", "none", "default"].includes(e.name.toLowerCase())) ??
+				routableExits[routableExits.length - 1]!;
 			const transcript = ctx.turns
 				.filter((t) => t.role !== "system")
 				.slice(-40)
@@ -171,7 +199,7 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 			});
 			evalCtx.addMessage({
 				role: "user",
-				content: `Statement/question: ${node.router?.condition ?? ""}\n\nOptions:\n${node.exits
+				content: `Statement/question: ${node.router?.condition ?? ""}\n\nOptions:\n${routableExits
 					.map((e) => `- ${e.name}: ${e.description}`)
 					.join("\n")}\n\nConversation transcript:\n${transcript}`,
 			});
@@ -190,8 +218,8 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 				decision = res.text.trim();
 				const lower = decision.toLowerCase();
 				chosen =
-					node.exits.find((e) => e.name.toLowerCase() === lower) ??
-					node.exits.find((e) => lower.includes(e.name.toLowerCase())) ??
+					routableExits.find((e) => e.name.toLowerCase() === lower) ??
+					routableExits.find((e) => lower.includes(e.name.toLowerCase())) ??
 					fallbackExit;
 			} catch (err) {
 				console.error(`flow: router node "${node.id}" evaluation failed, using fallback exit`, err);

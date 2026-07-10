@@ -180,6 +180,14 @@ const MIGRATIONS: { version: number; name: string; up: string }[] = [
 		// new call classes don't require a schema change.
 		up: `ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS breakdown JSONB;`,
 	},
+	{
+		version: 4,
+		name: "calls-contact-tags",
+		// Per-call CRM tag names (Phase 5b — tag-driven exit routing seed).
+		// Nullable: old rows / calls dispatched without tags stay NULL and dispatch
+		// omits the field.
+		up: `ALTER TABLE calls ADD COLUMN IF NOT EXISTS contact_tags JSONB;`,
+	},
 ];
 
 /** Apply pending migrations on boot. */

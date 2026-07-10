@@ -22,6 +22,7 @@ export interface CreateOutboundInput {
 	variables?: Record<string, string>;
 	metadata?: Record<string, unknown>;
 	contactState?: ContactStateEntryT[];
+	contactTags?: string[];
 }
 
 export async function createOutboundCall(input: CreateOutboundInput) {
@@ -31,13 +32,14 @@ export async function createOutboundCall(input: CreateOutboundInput) {
 
 	await sql`
 		INSERT INTO calls (id, project, agent_id, agent_version, direction, status,
-		                   to_number, from_number, room_name, scheduled_at, variables, metadata, contact_state)
+		                   to_number, from_number, room_name, scheduled_at, variables, metadata, contact_state, contact_tags)
 		VALUES (${callId}, ${input.project}, ${input.agent.id}, ${input.agent.version},
 		        'outbound', ${scheduled ? "scheduled" : "queued"},
 		        ${input.to}, ${input.from ?? null}, ${roomName},
 		        ${input.scheduledAt ?? null},
 		        ${jsonb(input.variables ?? {})}, ${jsonb(input.metadata ?? {})},
-		        ${input.contactState ? jsonb(input.contactState) : null})`;
+		        ${input.contactState ? jsonb(input.contactState) : null},
+		        ${input.contactTags ? jsonb(input.contactTags) : null})`;
 
 	const eventType = scheduled ? "call.scheduled" : "call.queued";
 	await logCallEvent(
@@ -86,6 +88,9 @@ export async function dispatchOutbound(callId: string): Promise<void> {
 				metadata: (call.metadata ?? {}) as Record<string, unknown>,
 				...(call.contact_state
 					? { contactState: call.contact_state as DispatchMetadata["contactState"] }
+					: {}),
+				...(call.contact_tags
+					? { contactTags: call.contact_tags as DispatchMetadata["contactTags"] }
 					: {}),
 			},
 		});

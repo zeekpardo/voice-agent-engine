@@ -1,4 +1,4 @@
-import { ContactState } from "@voice-engine/shared/agent-config";
+import { ContactState, ContactTags } from "@voice-engine/shared/agent-config";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
@@ -22,6 +22,8 @@ const SessionBody = z.object({
 	/** Per-call known-contact data (Phase 1): sibling of variables/metadata,
 	 * built by the SaaS from the caller's CRM record. Optional. */
 	contactState: ContactState.optional(),
+	/** Per-call CRM tag names (Phase 5b): sibling of contactState. Optional. */
+	contactTags: ContactTags.optional(),
 });
 
 sessions.post("/sessions", async (c) => {
@@ -41,6 +43,7 @@ sessions.post("/sessions", async (c) => {
 		variables: body.variables,
 		metadata: body.metadata,
 		contactState: body.contactState,
+		contactTags: body.contactTags,
 	});
 	return c.json(session, 201);
 });

@@ -8,7 +8,7 @@ import { buildTools } from "../tools.js";
 // sees (`exit_${sanitize(name)}`) must equal the ids the gateway generated with
 // the same transform, so both sides MUST derive from this one source.
 import { slugify as sanitize } from "../vendor/slugify.js";
-import { compactChatContext, type FlowRuntimeContext } from "./context.js";
+import { compactChatContext, type FlowRuntimeContext, tagRulesSatisfied } from "./context.js";
 import type { ObjectivesTracker, ResolvedTarget } from "./objectives.js";
 
 /**
@@ -148,11 +148,32 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 			bundle.tools.filter((t) => node.toolIds.includes(t.id as string)),
 			dispatch,
 		);
-		// With objectives, the primary exit (exits[0]) belongs to the
-		// ENGINE — the judge takes it once the data is verified; the model
-		// gets no tool for it (this is what stops eager exits). Secondary
-		// exits ("Wrong number") stay model-callable.
-		const toolExits = hasObjectives ? node.exits.slice(1) : node.exits;
+		// Tag-driven exit gating (Phase 5b): an exit whose tagRules aren't
+		// satisfied by the current tag set is NOT exposed here (and the objectives
+		// primary falls through to the first non-gated exit). Evaluated at build
+		// time — a mid-node tag change takes effect on the next handoff, when this
+		// node (or the next) is rebuilt.
+		const nonGatedExits = node.exits.filter((e) => tagRulesSatisfied(e.tagRules, ctx.contactTags));
+		if (nonGatedExits.length < node.exits.length) {
+			reportEvent(dispatch.callId, "flow.exits_gated", {
+				node: node.id,
+				gated: node.exits.filter((e) => !nonGatedExits.includes(e)).map((e) => e.name),
+			});
+		}
+		// With objectives, the primary exit (the first NON-GATED exit) belongs to
+		// the ENGINE — the judge takes it once the data is verified; the model gets
+		// no tool for it (this is what stops eager exits). Secondary non-gated exits
+		// ("Wrong number") stay model-callable. All exits gated → no primary: the
+		// engine ends/continues per current no-exit semantics (warned below).
+		const objectivesPrimary = hasObjectives ? nonGatedExits[0] : undefined;
+		if (hasObjectives && node.exits.length > 0 && !objectivesPrimary) {
+			reportEvent(dispatch.callId, "flow.no_available_exit", {
+				node: node.id,
+				reason: "all exits gated by tagRules",
+			});
+			console.warn(`flow: node "${node.id}" has objectives but every exit is tag-gated — objectives will end the call`);
+		}
+		const toolExits = hasObjectives ? nonGatedExits.slice(1) : nonGatedExits;
 		// Guards against duplicate exit invocations from this node instance —
 		// e.g. preemptiveGeneration drafting a reply (incl. tool calls) off an
 		// interim transcript, then generating a second, final reply that calls
@@ -265,7 +286,7 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 					id: node.id,
 					objectives,
 					judge: node.judge,
-					primaryExit: { name: node.exits[0]?.name ?? "end", target: node.exits[0]?.target },
+					primaryExit: { name: objectivesPrimary?.name ?? "end", target: objectivesPrimary?.target },
 				});
 				// Conversation maxDurationSeconds (Phase 2): a SOFT cap. On expiry,
 				// nudge the agent to wrap up via a generated turn (the least invasive

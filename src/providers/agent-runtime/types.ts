@@ -16,6 +16,8 @@ export interface DispatchMetadata {
 	metadata: Record<string, unknown>;
 	/** Per-call known-contact data (Phase 1). Optional: old dispatches omit it. */
 	contactState?: ContactStateEntryT[];
+	/** Per-call CRM tag names (Phase 5b — seeds the worker's tag set). Optional. */
+	contactTags?: string[];
 }
 
 export interface WebSessionInput {

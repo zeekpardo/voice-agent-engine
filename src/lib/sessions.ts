@@ -12,6 +12,8 @@ export interface CreateWebSessionInput {
 	metadata?: Record<string, unknown>;
 	/** Per-call known-contact data (Phase 1); persisted + forwarded in dispatch. */
 	contactState?: ContactStateEntryT[];
+	/** Per-call CRM tag names (Phase 5b); persisted + forwarded in dispatch. */
+	contactTags?: string[];
 }
 
 export interface WebSessionResult {
@@ -34,12 +36,13 @@ export async function createWebSession(input: CreateWebSessionInput): Promise<We
 	const variables = input.variables ?? {};
 	const metadata = input.metadata ?? {};
 	const contactState = input.contactState;
+	const contactTags = input.contactTags;
 
 	await sql`
-		INSERT INTO calls (id, project, agent_id, agent_version, direction, status, room_name, variables, metadata, contact_state)
+		INSERT INTO calls (id, project, agent_id, agent_version, direction, status, room_name, variables, metadata, contact_state, contact_tags)
 		VALUES (${callId}, ${input.project}, ${input.agent.id}, ${input.agent.version},
 		        'web', 'queued', ${roomName}, ${jsonb(variables)}, ${jsonb(metadata)},
-		        ${contactState ? jsonb(contactState) : null})`;
+		        ${contactState ? jsonb(contactState) : null}, ${contactTags ? jsonb(contactTags) : null})`;
 
 	const { roomUrl, token } = await agentRuntime.createWebSession({
 		roomName,
@@ -52,6 +55,7 @@ export async function createWebSession(input: CreateWebSessionInput): Promise<We
 			variables,
 			metadata,
 			...(contactState ? { contactState } : {}),
+			...(contactTags ? { contactTags } : {}),
 		},
 	});
 

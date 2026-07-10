@@ -92,6 +92,10 @@ export default defineAgent({
 		// writes (objectives / set_field) upsert into it so the next node's prompt
 		// rebuild reflects the new value. Never re-fetched mid-call.
 		const contactState = dispatch.contactState ? [...dispatch.contactState] : [];
+		// Per-call tag set (Phase 5b — tag-driven exit routing). Seeded from the
+		// dispatch's contactTags (the caller's CRM tags at dispatch, or none) and
+		// grown/pruned as modify_tags nodes run during the call.
+		const contactTags = new Set<string>(dispatch.contactTags ?? []);
 		// Rolling in-call memory (Phase 3). Resolve config.memory with defaults —
 		// ON unless explicitly disabled. `rollingSummary` is a stable-reference
 		// mutable holder shared into agent-builder (renders it) and memory.ts (writes it).
@@ -225,6 +229,7 @@ export default defineAgent({
 			// hardcoded. Defaults preserve pre-existing configs (see agent-config.ts).
 			const fieldWriteDef = findToolDef(bundle.tools, config.fieldWriteToolId ?? "update_contact");
 			const tagWriteDef = findToolDef(bundle.tools, config.tagWriteToolId ?? "add_tag");
+			const tagRemoveDef = findToolDef(bundle.tools, config.tagRemoveToolId ?? "remove_tag");
 			const resolveToolDef = (toolId: string | undefined, fallback: typeof fieldWriteDef) =>
 				findToolDef(bundle.tools, toolId) ?? fallback;
 
@@ -242,6 +247,7 @@ export default defineAgent({
 				nodesById,
 				turns,
 				contactState,
+				contactTags,
 				rollingSummary,
 				memory,
 				get session() {
@@ -265,6 +271,7 @@ export default defineAgent({
 				prohibited,
 				fieldWriteDef,
 				tagWriteDef,
+				tagRemoveDef,
 				resolveToolDef,
 				endCallTool,
 				EMPTY_PARAMS,

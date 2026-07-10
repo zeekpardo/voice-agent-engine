@@ -257,6 +257,16 @@ export interface FlowRuntimeContext {
 	contactState: ContactStateEntryT[];
 
 	/**
+	 * Per-call in-memory tag set (Phase 5b — tag-driven exit routing). Seeded
+	 * from dispatch `contactTags`; every tag added via a modify_tags node / the
+	 * config tag-write tool is inserted and every removed tag is deleted, so exit
+	 * `tagRules` gate against the live set. A stable Set reference threaded into
+	 * router (writes on modify_tags) + agent-builder (reads to gate exits).
+	 * Mid-node tag changes take effect at the next node handoff (per-node build).
+	 */
+	contactTags: Set<string>;
+
+	/**
 	 * Rolling in-call summary holder (Phase 3). A stable-reference mutable object
 	 * (like contactState): flow/memory.ts writes `.text` after each async refresh,
 	 * agent-builder reads it into every node's `## CONVERSATION SO FAR` block.
@@ -299,6 +309,10 @@ export interface FlowRuntimeContext {
 	// node may override per-node via resolveToolDef(node.…​.toolId).
 	fieldWriteDef?: ToolDef;
 	tagWriteDef?: ToolDef;
+	/** Config-designated tag-REMOVAL tool (config.tagRemoveToolId — Phase 5b).
+	 * modify_tags removals invoke this. Undefined when the project registers no
+	 * such tool (removal is then a logged no-op, but the tag set still updates). */
+	tagRemoveDef?: ToolDef;
 	/** Resolve a config tool id (ToolDef.name, then ToolDef.id) to its def, or
 	 * fall back to the given default when the id is unset/unknown. */
 	resolveToolDef(toolId: string | undefined, fallback: ToolDef | undefined): ToolDef | undefined;
@@ -337,6 +351,26 @@ export function upsertContactState(
 		// list: fall back to the raw key so the prompt still reads sensibly.
 		list.push({ key, label: label ?? key, value });
 	}
+}
+
+/** An exit's optional tag-gating rules (Phase 5b). */
+export interface TagRules {
+	mustHave?: string[];
+	cantHave?: string[];
+}
+
+/**
+ * Tag-driven exit gating (Phase 5b): is this exit allowed given the call's
+ * current tag set? An exit with no tagRules is always allowed. `mustHave`: every
+ * listed tag must be present. `cantHave`: none of the listed tags may be present.
+ * Deterministic, zero LLM cost. `tagSet` is the worker's live in-memory set,
+ * seeded from dispatch `contactTags` and grown as tags are written mid-call.
+ */
+export function tagRulesSatisfied(tagRules: TagRules | undefined, tagSet: Set<string>): boolean {
+	if (!tagRules) return true;
+	if (tagRules.mustHave?.some((t) => !tagSet.has(t))) return false;
+	if (tagRules.cantHave?.some((t) => tagSet.has(t))) return false;
+	return true;
 }
 
 /**

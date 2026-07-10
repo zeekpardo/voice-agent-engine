@@ -234,6 +234,18 @@ export const AgentConfig = z.object({
 									 * Set false to force asking even when the value is known.
 									 * Default true. */
 									skipIfKnown: z.boolean().default(true),
+									/**
+									 * Aggregate objective (CloseBot's `get_full_address`). When set,
+									 * this objective has NO own judge question: it lists the keys of
+									 * OTHER objectives in the SAME node whose answers it composes. It
+									 * completes automatically the moment every part is met; its answer
+									 * is the parts' answers joined (in aggregateOf order, space-separated),
+									 * and then its own `field` write fires as usual. Parts may have their
+									 * own `field` or not. Excluded from the judge's unmet list.
+									 * Constraints (validated): keys must reference other objectives in
+									 * this node; no self-reference; no aggregate-of-aggregate.
+									 */
+									aggregateOf: z.array(z.string().min(1)).min(1).optional(),
 								}),
 							)
 							.optional(),
@@ -264,6 +276,22 @@ export const AgentConfig = z.object({
 									description: z.string().min(1),
 									/** Node id to move to; omit to end the call after this exit. */
 									target: z.string().optional(),
+									/**
+									 * Tag-driven exit gating (Phase 5b — deterministic, zero LLM cost).
+									 * An exit whose tagRules are NOT satisfied by the call's current
+									 * in-memory tag set is not exposed as an exit tool when the node's
+									 * agent is built, and is skipped as a router/objectives target
+									 * candidate. `mustHave`: every listed tag must be present.
+									 * `cantHave`: none of the listed tags may be present. The tag set
+									 * seeds from dispatch `contactTags` and grows as modify_tags /
+									 * tag-write tools run; mid-node tag changes take effect at the next
+									 * handoff (per-node build granularity). */
+									tagRules: z
+										.object({
+											mustHave: z.array(z.string().min(1)).optional(),
+											cantHave: z.array(z.string().min(1)).optional(),
+										})
+										.optional(),
 								}),
 							)
 							.default([]),
@@ -336,6 +364,32 @@ export const AgentConfig = z.object({
 							code: "custom",
 							message: `node "${node.id}" objective keys must be unique`,
 						});
+					}
+					// Aggregate objectives (Phase 5b): parts must reference other
+					// objectives in this node; no self-reference; no aggregate-of-aggregate.
+					const aggregateKeys = new Set(
+						node.objectives.filter((o) => o.aggregateOf?.length).map((o) => o.key),
+					);
+					for (const o of node.objectives) {
+						if (!o.aggregateOf?.length) continue;
+						for (const part of o.aggregateOf) {
+							if (part === o.key) {
+								ctx.addIssue({
+									code: "custom",
+									message: `node "${node.id}" aggregate objective "${o.key}" cannot reference itself`,
+								});
+							} else if (!keys.has(part)) {
+								ctx.addIssue({
+									code: "custom",
+									message: `node "${node.id}" aggregate objective "${o.key}" references unknown objective "${part}"`,
+								});
+							} else if (aggregateKeys.has(part)) {
+								ctx.addIssue({
+									code: "custom",
+									message: `node "${node.id}" aggregate objective "${o.key}" references another aggregate "${part}" — aggregate-of-aggregate is not allowed`,
+								});
+							}
+						}
 					}
 				}
 				if (node.conversation) {
@@ -457,6 +511,13 @@ export const AgentConfig = z.object({
 	 */
 	fieldWriteToolId: z.string().min(1).default("update_contact"),
 	tagWriteToolId: z.string().min(1).default("add_tag"),
+	/**
+	 * Tag-REMOVAL tool (Phase 5b — modify_tags removal support). modify_tags
+	 * removals invoke this config-named tool (matched against ToolDef.name, then
+	 * ToolDef.id). BACK-COMPAT: defaults to "remove_tag" (the CRM removal tool the
+	 * SaaS now registers alongside add_tag). Same neutrality/deprecation story as
+	 * tagWriteToolId — the engine hardcodes no CRM tool name. */
+	tagRemoveToolId: z.string().min(1).default("remove_tag"),
 
 	/** Built-in end_call tool: the LLM hangs up after wrapping the conversation. */
 	endCall: z
@@ -545,6 +606,17 @@ export const ContactStateEntry = z.object({
 });
 export const ContactState = z.array(ContactStateEntry);
 export type ContactStateEntryT = z.infer<typeof ContactStateEntry>;
+
+/**
+ * Contact tags (Phase 5b — tag-driven exit routing seed). PER-CALL data, a
+ * sibling of `contactState` in the dispatch payload: the caller's CRM tag names
+ * at dispatch. The worker seeds its in-memory tag set from these and adds every
+ * tag written via modify_tags / tag-write tools during the call; exits with
+ * `tagRules` are gated against that set. Opaque generic strings — the engine
+ * reads no CRM meaning into them. Failure-isolated like contactState.
+ */
+export const ContactTags = z.array(z.string().min(1));
+export type ContactTagsT = z.infer<typeof ContactTags>;
 
 /**
  * Structural sub-types derived from the ONE schema above (never hand-written).

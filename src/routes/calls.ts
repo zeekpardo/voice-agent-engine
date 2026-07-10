@@ -1,4 +1,4 @@
-import { ContactState } from "@voice-engine/shared/agent-config";
+import { ContactState, ContactTags } from "@voice-engine/shared/agent-config";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
@@ -33,6 +33,7 @@ const OutboundBody = z.object({
 	variables: z.record(z.string()).optional(),
 	metadata: z.record(z.unknown()).optional(),
 	contactState: ContactState.optional(),
+	contactTags: ContactTags.optional(),
 });
 
 calls.post("/calls", async (c) => {
@@ -55,6 +56,7 @@ calls.post("/calls", async (c) => {
 		variables: body.variables,
 		metadata: body.metadata,
 		contactState: body.contactState,
+		contactTags: body.contactTags,
 	});
 	return c.json(call, 201);
 });
