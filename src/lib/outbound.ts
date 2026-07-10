@@ -74,11 +74,21 @@ export async function dispatchOutbound(callId: string): Promise<void> {
 
 	await sql`UPDATE calls SET status = 'dialing', updated_at = now() WHERE id = ${callId}`;
 
+	// Recording is per-agent opt-in, read from the config version pinned to this
+	// call. Outbound is always a voice channel, so no channel check is needed.
+	const versions = await sql`
+		SELECT config FROM agent_versions
+		WHERE agent_id = ${call.agent_id as string} AND version = ${call.agent_version as number}`;
+	const recording =
+		(versions[0]?.config as { recording?: { enabled?: boolean } } | undefined)?.recording
+			?.enabled === true;
+
 	try {
-		await agentRuntime.dispatchCall({
+		const result = await agentRuntime.dispatchCall({
 			roomName: call.room_name as string,
 			to: call.to_number as string,
 			from: (call.from_number as string | null) ?? undefined,
+			recording,
 			dispatch: {
 				projectId: call.project as string,
 				agentId: call.agent_id as string,
@@ -94,6 +104,13 @@ export async function dispatchOutbound(callId: string): Promise<void> {
 					: {}),
 			},
 		});
+		if (result.recording) {
+			await sql`
+				UPDATE calls SET recording_url = ${result.recording.recordingUrl},
+				                 recording_egress_id = ${result.recording.recordingEgressId ?? null},
+				                 updated_at = now()
+				WHERE id = ${callId}`;
+		}
 		await logCallEvent(sql, { callId, type: "call.dialing", payload: { to: call.to_number } });
 	} catch (err) {
 		console.error(`outbound dispatch failed for ${callId}:`, err);

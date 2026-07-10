@@ -37,6 +37,17 @@ const schema = z.object({
 	// Defaults for the LLM (/v1/chat) and TTS (/v1/speak) proxies.
 	CHAT_DEFAULT_MODEL: z.string().default("grok-4-fast"),
 	TTS_DEFAULT_VOICE: z.string().default("ara"),
+	// Call recording destination (LiveKit Egress → S3-compatible storage). All
+	// optional: when an agent enables recording but these are unset, the gateway
+	// logs a warning and skips egress — it NEVER fails the call. S3_ENDPOINT is
+	// only needed for non-AWS S3-compatible stores (R2, MinIO, GCS-S3); leaving it
+	// unset targets AWS S3 in S3_REGION. Bucket + key + secret are the minimum for
+	// recording to actually start.
+	S3_ENDPOINT: z.string().optional(),
+	S3_BUCKET: z.string().optional(),
+	S3_ACCESS_KEY: z.string().optional(),
+	S3_SECRET_KEY: z.string().optional(),
+	S3_REGION: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);

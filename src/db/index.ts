@@ -205,6 +205,18 @@ const MIGRATIONS: { version: number; name: string; up: string }[] = [
 		// without an in-progress draft stay NULL and dispatch reads `config` only.
 		up: `ALTER TABLE agents ADD COLUMN IF NOT EXISTS draft JSONB, ADD COLUMN IF NOT EXISTS draft_updated_at TIMESTAMPTZ;`,
 	},
+	{
+		version: 7,
+		name: "calls-recording",
+		// Call recording (LiveKit Egress, Tier-2 #10). recording_url is the
+		// deterministic S3 object reference (s3://bucket/{room_name}.ogg) captured
+		// when egress starts; recording_egress_id is LiveKit's egress id, retained
+		// so a future webhook receiver can correlate completion/failure updates.
+		// Both nullable: recording is per-agent opt-in, so most rows stay NULL.
+		up: `ALTER TABLE calls
+			ADD COLUMN IF NOT EXISTS recording_url TEXT,
+			ADD COLUMN IF NOT EXISTS recording_egress_id TEXT;`,
+	},
 ];
 
 /** Apply pending migrations on boot. */

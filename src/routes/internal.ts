@@ -328,7 +328,7 @@ internal.post("/calls/:id/complete", async (c) => {
 			end_reason: body.end_reason,
 			summary,
 			extracted,
-			recording_url: null,
+			recording_url: (call.recording_url as string | null) ?? null,
 		});
 		if (body.transcript) {
 			void emitEvent(call.project as string, {

@@ -27,6 +27,10 @@ export interface WebSessionInput {
 	roomName: string;
 	participantIdentity: string;
 	dispatch: DispatchMetadata;
+	/** Start audio-only call recording (egress) for this session. Voice only —
+	 * callers must not set this for text sessions. Silently skipped if the
+	 * gateway has no storage (S3_*) configured. */
+	recording?: boolean;
 }
 
 export interface DispatchCallInput {
@@ -34,6 +38,17 @@ export interface DispatchCallInput {
 	to: string;
 	from?: string;
 	dispatch: DispatchMetadata;
+	/** Start audio-only call recording (egress) right after dispatch. Skipped if
+	 * the gateway has no storage (S3_*) configured — never fails the call. */
+	recording?: boolean;
+}
+
+/** Recording reference captured when egress starts; persisted on the calls row. */
+export interface RecordingRef {
+	/** Deterministic S3 object reference (s3://bucket/{room}.ogg). */
+	recordingUrl: string;
+	/** LiveKit egress id, when known at start (explicit egress path). */
+	recordingEgressId?: string;
 }
 
 export interface ProvisionNumberInput {
@@ -46,10 +61,14 @@ export interface AgentRuntime {
 	readonly name: string; // "livekit"
 
 	/** Browser session: room + participant token; agent dispatched on join. */
-	createWebSession(input: WebSessionInput): Promise<{ roomUrl: string; token: string }>;
+	createWebSession(
+		input: WebSessionInput,
+	): Promise<{ roomUrl: string; token: string; recording?: RecordingRef }>;
 
 	/** Outbound: place a call and attach the agent. (Phase 3) */
-	dispatchCall(input: DispatchCallInput): Promise<{ providerCallRef: string; roomName: string }>;
+	dispatchCall(
+		input: DispatchCallInput,
+	): Promise<{ providerCallRef: string; roomName: string; recording?: RecordingRef }>;
 
 	/** Inbound numbers. (Phase 3) */
 	provisionNumber(input: ProvisionNumberInput): Promise<{ e164: string; providerRef: string }>;

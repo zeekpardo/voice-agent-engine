@@ -48,9 +48,13 @@ export async function createWebSession(input: CreateWebSessionInput): Promise<We
 		        'web', 'queued', ${roomName}, ${jsonb(variables)}, ${jsonb(metadata)},
 		        ${contactState ? jsonb(contactState) : null}, ${contactTags ? jsonb(contactTags) : null}, ${channel})`;
 
-	const { roomUrl, token } = await agentRuntime.createWebSession({
+	// Recording is per-agent opt-in and voice-only — text sessions never record.
+	const recording = input.agent.config.recording?.enabled === true && channel === "voice";
+
+	const { roomUrl, token, recording: recordingRef } = await agentRuntime.createWebSession({
 		roomName,
 		participantIdentity: `user_${callId}`,
+		recording,
 		dispatch: {
 			projectId: input.project,
 			agentId: input.agent.id,
@@ -63,6 +67,16 @@ export async function createWebSession(input: CreateWebSessionInput): Promise<We
 			...(input.channel ? { channel: input.channel } : {}),
 		},
 	});
+
+	// Persist the recording reference (deterministic S3 path known at start).
+	// The egress id, when it later exists, would arrive via a LiveKit webhook.
+	if (recordingRef) {
+		await sql`
+			UPDATE calls SET recording_url = ${recordingRef.recordingUrl},
+			                 recording_egress_id = ${recordingRef.recordingEgressId ?? null},
+			                 updated_at = now()
+			WHERE id = ${callId}`;
+	}
 
 	await logCallEvent(
 		sql,
