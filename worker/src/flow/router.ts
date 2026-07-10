@@ -18,7 +18,7 @@ import type { ResolvedTarget } from "./objectives.js";
  *                 to its single exit — or, with no exit target, ends the call
  *                 once the line finishes playing.
  *  - set_field /
- *    modify_tags: fire the CRM webhook(s) silently and continue.
+ *    modify_tags: fire the config-designated write tool(s) silently and continue.
  *  - transfer:    handed back to the caller as { kind: "transfer" } so the
  *                 detached transfer sequence can run.
  *
@@ -59,7 +59,7 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 				return { kind: "transfer", nodeId: node.id };
 			}
 
-			// Deterministic CRM action nodes: fire the webhook(s) silently and
+			// Deterministic write-action nodes: fire the configured tool(s) silently and
 			// continue to the single exit — they never speak or wait.
 			if (node.kind === "set_field") {
 				reportEvent(dispatch.callId, "flow.node", {
@@ -68,8 +68,11 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 					kind: "set_field",
 				});
 				const sf = node.setField;
-				if (sf?.field && ctx.updateContactDef) {
-					void invokeTool(ctx.updateContactDef, dispatch, {
+				// Config-driven: the node may name its own write tool; otherwise the
+				// config's designated field-write tool is used (engine neutrality).
+				const fieldWriteDef = ctx.resolveToolDef(sf?.toolId, ctx.fieldWriteDef);
+				if (sf?.field && fieldWriteDef) {
+					void invokeTool(fieldWriteDef, dispatch, {
 						field_name: sf.field,
 						value: ctx.interpolate(sf.value ?? ""),
 					}).catch((err) => console.error(`flow: set_field "${sf.field}" failed`, err));
@@ -91,9 +94,10 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 					kind: "modify_tags",
 				});
 				const add = node.modifyTags?.add ?? [];
-				if (add.length > 0 && ctx.addTagDef) {
+				const tagWriteDef = ctx.resolveToolDef(node.modifyTags?.toolId, ctx.tagWriteDef);
+				if (add.length > 0 && tagWriteDef) {
 					for (const tag of add) {
-						void invokeTool(ctx.addTagDef, dispatch, { tag }).catch((err) =>
+						void invokeTool(tagWriteDef, dispatch, { tag }).catch((err) =>
 							console.error(`flow: modify_tags add "${tag}" failed`, err),
 						);
 					}

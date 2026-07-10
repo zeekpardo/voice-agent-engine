@@ -97,18 +97,40 @@ export const AgentConfig = z.object({
 						router: z.object({ condition: z.string().min(1) }).optional(),
 						/** Statement-only: the exact line spoken ({{variables}} interpolated). */
 						statement: z.object({ say: z.string().min(1) }).optional(),
-						/** set_field-only: deterministically write one CRM field. */
+						/**
+						 * set_field-only: deterministically write one data field.
+						 *
+						 * ENGINE NEUTRALITY: the engine no longer assumes a tool named
+						 * "update_contact" exists. `toolId` names the config tool that performs
+						 * the write (matched against ToolDef.name, falling back to ToolDef.id).
+						 * Omitted -> the call falls back to config.fieldWriteToolId (which itself
+						 * defaults to "update_contact"), preserving the behavior of every config
+						 * authored before this field existed.
+						 *
+						 * DEPRECATION PATH: the "update_contact" default is a back-compat shim for
+						 * pre-existing pinned configs. New configs emitted by the SaaS compiler
+						 * always set `toolId` explicitly, so the default can be dropped once no
+						 * live/pinned config relies on it (a data audit, NOT a code change alone).
+						 */
 						setField: z
 							.object({
 								field: z.string().min(1),
 								value: z.string(),
+								/** Config tool id/name that writes the field. Omit -> config.fieldWriteToolId. */
+								toolId: z.string().min(1).optional(),
 							})
 							.optional(),
-						/** modify_tags-only: deterministically add/remove contact tags. */
+						/**
+						 * modify_tags-only: deterministically add/remove tags. `toolId` names the
+						 * config tool that mutates tags (see setField.toolId for the
+						 * neutrality/deprecation story). Omitted -> config.tagWriteToolId.
+						 */
 						modifyTags: z
 							.object({
 								add: z.array(z.string().min(1)).default([]),
 								remove: z.array(z.string().min(1)).default([]),
+								/** Config tool id/name that adds tags. Omit -> config.tagWriteToolId. */
+								toolId: z.string().min(1).optional(),
 							})
 							.optional(),
 						/** Transfer-only: the simulated hand-off. */
@@ -140,7 +162,7 @@ export const AgentConfig = z.object({
 									key: z.string().min(1),
 									/** What must be learned from the caller — judged against this. */
 									description: z.string().min(1),
-									/** Human CRM field name (update_contact's field_name) auto-written when met. */
+									/** Field name auto-written (via config.fieldWriteToolId) when met. */
 									field: z.string().optional(),
 									/** Allowed values (picklist) — the judge coerces the answer to one of these. */
 									options: z.array(z.string().min(1)).min(2).optional(),
@@ -333,6 +355,26 @@ export const AgentConfig = z.object({
 
 	// Capabilities
 	toolIds: z.array(z.string()).default([]), // must belong to the same project
+
+	/**
+	 * Designated write tools (spec §4 — engine neutrality). The engine performs
+	 * two kinds of automatic writes: set_field nodes + verified objectives write
+	 * a data field; modify_tags nodes add tags. Rather than hardcoding the
+	 * business tool names, the engine resolves the tool to invoke from these
+	 * config ids (matched against ToolDef.name, then ToolDef.id). A set_field /
+	 * modify_tags node may override per-node via node.setField.toolId /
+	 * node.modifyTags.toolId; when it doesn't, these config-level ids are used.
+	 *
+	 * BACK-COMPAT: they default to the historical CRM tool names
+	 * ("update_contact" / "add_tag"), so every config authored before these
+	 * fields existed — including versions pinned to in-flight calls — keeps its
+	 * exact prior behavior with no migration. The SaaS compiler now emits tool
+	 * ids explicitly (self-describing configs); the defaults are a deprecation
+	 * shim to be removed only after a data audit confirms nothing relies on them.
+	 */
+	fieldWriteToolId: z.string().min(1).default("update_contact"),
+	tagWriteToolId: z.string().min(1).default("add_tag"),
+
 	/** Built-in end_call tool: the LLM hangs up after wrapping the conversation. */
 	endCall: z
 		.object({

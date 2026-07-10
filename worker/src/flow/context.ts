@@ -189,9 +189,22 @@ export interface FlowRuntimeContext {
 	missingNote: string;
 	prohibited: string;
 
-	// shared tool defs
-	updateContactDef?: ToolDef;
-	addTagDef?: ToolDef;
+	// Config-designated write tools, resolved once from config.fieldWriteToolId /
+	// config.tagWriteToolId (engine neutrality — no hardcoded CRM tool names).
+	// Undefined when the project registers no such tool. A set_field / modify_tags
+	// node may override per-node via resolveToolDef(node.…​.toolId).
+	fieldWriteDef?: ToolDef;
+	tagWriteDef?: ToolDef;
+	/** Resolve a config tool id (ToolDef.name, then ToolDef.id) to its def, or
+	 * fall back to the given default when the id is unset/unknown. */
+	resolveToolDef(toolId: string | undefined, fallback: ToolDef | undefined): ToolDef | undefined;
 	endCallTool: ReturnType<typeof llm.tool>;
 	EMPTY_PARAMS: JSONSchema7;
+}
+
+/** Look up a config tool by its designated id (ToolDef.name first — that's how
+ * the historical update_contact/add_tag defaults resolve — then ToolDef.id). */
+export function findToolDef(tools: ToolDef[], toolId: string | undefined): ToolDef | undefined {
+	if (!toolId) return undefined;
+	return tools.find((t) => t.name === toolId) ?? tools.find((t) => t.id === toolId);
 }

@@ -6,8 +6,9 @@ import { invokeTool } from "../tools.js";
  * Objective-driven nodes (voiceagent-engine/objectives-and-conversation-spec.md).
  * The conversational LLM only talks; after every caller turn a cheap judge
  * pass rates each unmet objective ASYNC (never delaying speech), auto-writes
- * CRM fields via update_contact, and the ENGINE takes the node's primary
- * exit once every required objective is verified.
+ * the verified value through the config's designated field-write tool
+ * (config.fieldWriteToolId), and the ENGINE takes the node's primary exit
+ * once every required objective is verified.
  *
  * Extracted from main.ts's flow branch: functions here take an explicit
  * ObjectivesDeps context instead of capturing session state via closure —
@@ -66,7 +67,10 @@ export interface ObjectivesDeps {
 		temperature?: number;
 		maxTokens?: number;
 	}) => { chat(opts: { chatCtx: llm.ChatContext }): { collect(): Promise<{ text: string }> } };
-	updateContactDef: ToolDef | undefined;
+	/** Config-designated field-write tool (config.fieldWriteToolId), or undefined
+	 * when the project registers no such tool. Engine neutrality — no hardcoded
+	 * CRM tool name; a verified objective's value is written through this. */
+	fieldWriteDef: ToolDef | undefined;
 	/** Follows an exit target through routers/statements/set_field/modify_tags
 	 * nodes to the next agent (or end). Owned by main.ts's flow branch. */
 	resolveTarget: (target: string | undefined) => Promise<ResolvedTarget>;
@@ -132,7 +136,7 @@ function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promi
 }
 
 export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
-	const { dispatch, turns, session, buildLlm, updateContactDef, resolveTarget, buildFlowAgent, startTransfer, hangUp, isCompleted } =
+	const { dispatch, turns, session, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, hangUp, isCompleted } =
 		deps;
 	const defaultJudgeLlm = buildLlm({ model: "grok-4-fast", temperature: 0, maxTokens: 400 });
 
@@ -140,15 +144,15 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 
 	const writeObjectiveField = (objective: FlowObjective, answer: string): void => {
 		if (!objective.field || !answer) return;
-		if (!updateContactDef) {
+		if (!fieldWriteDef) {
 			console.warn(
-				`flow: objective "${objective.key}" wants field "${objective.field}" but no update_contact tool is registered`,
+				`flow: objective "${objective.key}" wants field "${objective.field}" but no field-write tool (config.fieldWriteToolId) is registered`,
 			);
 			return;
 		}
 		// Snap to the exact picklist option when one matches case-insensitively.
 		const option = objective.options?.find((v) => v.toLowerCase() === answer.toLowerCase());
-		void invokeTool(updateContactDef, dispatch, {
+		void invokeTool(fieldWriteDef, dispatch, {
 			field_name: objective.field,
 			value: option ?? answer,
 		}).catch((err) => console.error(`flow: objective field write failed (${objective.field})`, err));

@@ -42,6 +42,14 @@ export interface AgentConfig {
 	};
 	timeouts: { maxCallSeconds: number; silenceHangupSeconds: number; noAnswerSeconds: number };
 	toolIds: string[];
+	/**
+	 * Config-designated write tools (engine neutrality). Resolved to a ToolDef
+	 * by name (then id). Optional on the wire; the worker defaults them to the
+	 * historical CRM names so pre-existing pinned configs are unchanged.
+	 * @see fieldWriteToolId/tagWriteToolId in src/lib/agent-config.ts
+	 */
+	fieldWriteToolId?: string;
+	tagWriteToolId?: string;
 	prohibitedWords?: string[];
 	flow?: {
 		entry: string;
@@ -74,7 +82,7 @@ export interface FlowObjective {
 	key: string;
 	/** What must be learned from the caller — the judge evaluates against this. */
 	description: string;
-	/** Human CRM field name (update_contact's field_name) auto-written when met. */
+	/** Field name auto-written (via config.fieldWriteToolId) when met. */
 	field?: string;
 	/** Allowed values (picklist) — the judge coerces the answer to one of these. */
 	options?: string[];
@@ -101,10 +109,12 @@ export interface FlowNode {
 	router?: { condition: string };
 	/** Statement-only: the exact line spoken ({{variables}} interpolated). */
 	statement?: { say: string };
-	/** set_field-only: deterministically write one CRM field ({{variables}} interpolated in value). */
-	setField?: { field: string; value: string };
-	/** modify_tags-only: deterministically add/remove contact tags. */
-	modifyTags?: { add?: string[]; remove?: string[] };
+	/** set_field-only: deterministically write one field ({{variables}} interpolated in
+	 * value). `toolId` names the config tool that writes it; omit → config.fieldWriteToolId. */
+	setField?: { field: string; value: string; toolId?: string };
+	/** modify_tags-only: deterministically add/remove tags. `toolId` names the config
+	 * tool that adds tags; omit → config.tagWriteToolId. */
+	modifyTags?: { add?: string[]; remove?: string[]; toolId?: string };
 	/** Transfer-only: announcement (pre-transfer voice), hold-music length,
 	 * and the voice used from here on (omitted = keep current voice). */
 	transfer?: {

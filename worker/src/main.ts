@@ -14,6 +14,7 @@ import {
 	type Turn,
 	buildTts,
 	collectMissingVars,
+	findToolDef,
 	inferenceModel,
 	interpolate,
 	interpolateSpoken,
@@ -189,8 +190,12 @@ export default defineAgent({
 		if (config.flow) {
 			const flow = config.flow;
 			const nodesById = new Map(flow.nodes.map((n) => [n.id, n]));
-			const updateContactDef = bundle.tools.find((t) => t.name === "update_contact");
-			const addTagDef = bundle.tools.find((t) => t.name === "add_tag");
+			// Engine neutrality: the write tools are named by the config, not
+			// hardcoded. Defaults preserve pre-existing configs (see agent-config.ts).
+			const fieldWriteDef = findToolDef(bundle.tools, config.fieldWriteToolId ?? "update_contact");
+			const tagWriteDef = findToolDef(bundle.tools, config.tagWriteToolId ?? "add_tag");
+			const resolveToolDef = (toolId: string | undefined, fallback: typeof fieldWriteDef) =>
+				findToolDef(bundle.tools, toolId) ?? fallback;
 
 			// One shared context threaded into every flow module. Values built
 			// after this point (session, hangUp, completion) are reached lazily
@@ -222,8 +227,9 @@ export default defineAgent({
 				pacingRules,
 				missingNote,
 				prohibited,
-				updateContactDef,
-				addTagDef,
+				fieldWriteDef,
+				tagWriteDef,
+				resolveToolDef,
 				endCallTool,
 				EMPTY_PARAMS,
 			};
@@ -252,7 +258,7 @@ export default defineAgent({
 					return state.session!;
 				},
 				buildLlm,
-				updateContactDef,
+				fieldWriteDef,
 				resolveTarget,
 				buildFlowAgent,
 				startTransfer,
