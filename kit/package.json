@@ -22,6 +22,7 @@
     }
   },
   "dependencies": {
+    "@voice-engine/shared": "workspace:*",
     "livekit-client": "^2.13.0",
     "ws": "^8.18.0"
   },

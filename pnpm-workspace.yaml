@@ -1,6 +1,7 @@
 packages:
   - "kit"
   - "worker"
+  - "packages/shared"
 
 allowBuilds:
   '@ffmpeg-installer/darwin-arm64': true

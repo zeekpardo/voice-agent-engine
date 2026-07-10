@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { verifySignature } from "@voice-engine/shared/hmac";
 
 /**
  * @noba/voice-kit/agent/server — backend helpers for the voice agent engine.
@@ -116,23 +116,7 @@ export const getTranscript = (id: string, cfg: GatewayConfig) =>
 
 // ---------------------------------------------------------------- signature verification
 
-const SIGNATURE_TOLERANCE_SECONDS = 300;
-
-/** Verify an engine signature (webhooks and tool invocations share the scheme). */
-export function verifySignature(
-	secret: string,
-	timestamp: string | null,
-	signatureHeader: string | null,
-	rawBody: string,
-): boolean {
-	if (!timestamp || !signatureHeader) return false;
-	const age = Math.abs(Date.now() / 1000 - Number(timestamp));
-	if (!Number.isFinite(age) || age > SIGNATURE_TOLERANCE_SECONDS) return false;
-	const expected = createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex");
-	const received = signatureHeader.replace(/^hmac-sha256=/, "");
-	if (expected.length !== received.length) return false;
-	return timingSafeEqual(Buffer.from(expected), Buffer.from(received));
-}
+export { verifySignature };
 
 export interface EngineEvent {
 	event_id: string;

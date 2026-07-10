@@ -1,9 +1,11 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
-import { jsonb, sql } from "../db/index.js";
+import { sql } from "../db/index.js";
 import { env } from "../env.js";
+import { logCallEvent } from "../lib/call-events.js";
 import { badRequest, unauthorized } from "../lib/errors.js";
+import { parseBody } from "../lib/http.js";
 import { newId } from "../lib/id.js";
 import { type PostCallConfig, summarizeAndExtract } from "../lib/postcall.js";
 import { recordUsage, type UsageKind } from "../lib/usage.js";
@@ -81,9 +83,11 @@ const InboundBody = z.object({
  * Creates the call row and returns the pinned agent bundle in one round trip.
  */
 internal.post("/calls/inbound", async (c) => {
-	const parsed = InboundBody.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) throw badRequest("Body must be { to_number, from_number, room_name }");
-	const { to_number, from_number, room_name } = parsed.data;
+	const { to_number, from_number, room_name } = await parseBody(
+		c,
+		InboundBody,
+		() => "Body must be { to_number, from_number, room_name }",
+	);
 
 	// SIP layers vary on the leading "+" — match either representation.
 	const digits = to_number.replace(/[^\d]/g, "");
@@ -102,17 +106,21 @@ internal.post("/calls/inbound", async (c) => {
 		VALUES (${callId}, ${number.project as string}, ${bundle.agent.id as string},
 		        ${bundle.agent.version}, 'inbound', 'active',
 		        ${to_number}, ${from_number}, ${room_name}, now())`;
-	await sql`
-		INSERT INTO call_events (id, call_id, type, payload)
-		VALUES (${newId("cev")}, ${callId}, 'call.started', ${jsonb({ direction: "inbound", from: from_number })})`;
-	void emitEvent(number.project as string, {
-		type: "call.started",
-		call_id: callId,
-		agent_id: bundle.agent.id as string,
-		direction: "inbound",
-		from_number,
-		to_number,
-	});
+	await logCallEvent(
+		sql,
+		{ callId, type: "call.started", payload: { direction: "inbound", from: from_number } },
+		{
+			project: number.project as string,
+			event: {
+				type: "call.started",
+				call_id: callId,
+				agent_id: bundle.agent.id as string,
+				direction: "inbound",
+				from_number,
+				to_number,
+			},
+		},
+	);
 
 	return c.json({ call_id: callId, ...bundle });
 });
@@ -129,9 +137,7 @@ internal.post("/calls/:id/events", async (c) => {
 	const call = rows[0];
 	if (!call) throw badRequest("Unknown call id");
 
-	const parsed = EventBody.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) throw badRequest("Body must be { type, payload? }");
-	const { type, payload } = parsed.data;
+	const { type, payload } = await parseBody(c, EventBody, () => "Body must be { type, payload? }");
 
 	if (type === "call.started") {
 		await sql`
@@ -139,17 +145,20 @@ internal.post("/calls/:id/events", async (c) => {
 			WHERE id = ${callId}`;
 	}
 
-	await sql`
-		INSERT INTO call_events (id, call_id, type, payload)
-		VALUES (${newId("cev")}, ${callId}, ${type}, ${jsonb(payload)})`;
-
-	void emitEvent(call.project as string, {
-		type,
-		call_id: callId,
-		agent_id: call.agent_id as string,
-		metadata: call.metadata,
-		...payload,
-	});
+	await logCallEvent(
+		sql,
+		{ callId, type, payload },
+		{
+			project: call.project as string,
+			event: {
+				type,
+				call_id: callId,
+				agent_id: call.agent_id as string,
+				metadata: call.metadata,
+				...payload,
+			},
+		},
+	);
 	return c.json({ ok: true });
 });
 
@@ -193,12 +202,11 @@ internal.post("/calls/:id/complete", async (c) => {
 	const call = rows[0];
 	if (!call) throw badRequest("Unknown call id");
 
-	const parsed = CompleteBody.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) {
-		const issue = parsed.error.issues[0];
-		throw badRequest(`Invalid completion: ${issue?.path.join(".")} — ${issue?.message}`);
-	}
-	const body = parsed.data;
+	const body = await parseBody(
+		c,
+		CompleteBody,
+		(issue) => `Invalid completion: ${issue?.path.join(".")} — ${issue?.message}`,
+	);
 
 	const duration =
 		body.duration_seconds ??
@@ -224,10 +232,11 @@ internal.post("/calls/:id/complete", async (c) => {
 					SET turns = EXCLUDED.turns, summary = EXCLUDED.summary, updated_at = now()`;
 		}
 
-		await tx`
-			INSERT INTO call_events (id, call_id, type, payload)
-			VALUES (${newId("cev")}, ${callId}, ${"call." + body.status},
-			        ${tx.json({ end_reason: body.end_reason, duration_seconds: duration })})`;
+		await logCallEvent(tx, {
+			callId,
+			type: "call." + body.status,
+			payload: { end_reason: body.end_reason, duration_seconds: duration },
+		});
 	});
 
 	for (const u of body.usage) {

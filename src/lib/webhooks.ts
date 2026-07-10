@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { signPayload } from "@voice-engine/shared/hmac";
 import { sql } from "../db/index.js";
 import { newId } from "./id.js";
 
@@ -14,9 +14,7 @@ import { newId } from "./id.js";
 const MAX_ATTEMPTS = 8;
 const DELIVERY_TIMEOUT_MS = 10_000;
 
-export function signPayload(secret: string, timestamp: string, body: string): string {
-	return createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
-}
+export { signPayload };
 
 export interface EngineEvent {
 	type: string; // call.queued | call.started | call.completed | tool.invoked | …

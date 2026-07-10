@@ -1,0 +1,15 @@
+{
+	"name": "@voice-engine/shared",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Zero-dependency helpers shared across the gateway (root), kit, and (manually, see worker/src/tools.ts and worker/src/main.ts) worker: HMAC webhook signing/verification and id-safe slugify.",
+	"exports": {
+		"./hmac": "./src/hmac.ts",
+		"./slugify": "./src/slugify.ts"
+	},
+	"devDependencies": {
+		"typescript": "^5.7.3"
+	},
+	"files": ["src"]
+}

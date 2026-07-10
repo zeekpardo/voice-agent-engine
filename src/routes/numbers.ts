@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
 import { sql } from "../db/index.js";
 import { AppError, badRequest } from "../lib/errors.js";
+import { parseBody } from "../lib/http.js";
 import { newId } from "../lib/id.js";
 import { getAgent } from "./agents.js";
 
@@ -25,11 +26,11 @@ const NumberBody = z.object({
 
 numbers.post("/numbers", async (c) => {
 	const key = c.get("apiKey");
-	const parsed = NumberBody.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) {
-		throw badRequest(`Invalid number: ${parsed.error.issues[0]?.message}`);
-	}
-	const { e164, inbound_agent_id } = parsed.data;
+	const { e164, inbound_agent_id } = await parseBody(
+		c,
+		NumberBody,
+		(issue) => `Invalid number: ${issue?.message}`,
+	);
 
 	if (inbound_agent_id) {
 		const agent = await getAgent(key.project, inbound_agent_id);

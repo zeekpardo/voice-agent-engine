@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
-import { badRequest } from "../lib/errors.js";
-import { createWebSession } from "../lib/sessions.js";
 import { AppError } from "../lib/errors.js";
+import { parseBody } from "../lib/http.js";
+import { createWebSession } from "../lib/sessions.js";
 import { getAgent } from "./agents.js";
 
 /**
@@ -22,19 +22,20 @@ const SessionBody = z.object({
 
 sessions.post("/sessions", async (c) => {
 	const key = c.get("apiKey");
-	const parsed = SessionBody.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) {
-		throw badRequest(`Invalid body: ${parsed.error.issues[0]?.message ?? "expected JSON"}`);
-	}
+	const body = await parseBody(
+		c,
+		SessionBody,
+		(issue) => `Invalid body: ${issue?.message ?? "expected JSON"}`,
+	);
 
-	const agent = await getAgent(key.project, parsed.data.agent_id);
+	const agent = await getAgent(key.project, body.agent_id);
 	if (!agent) throw new AppError(404, "not_found", "Agent not found");
 
 	const session = await createWebSession({
 		project: key.project,
 		agent,
-		variables: parsed.data.variables,
-		metadata: parsed.data.metadata,
+		variables: body.variables,
+		metadata: body.metadata,
 	});
 	return c.json(session, 201);
 });

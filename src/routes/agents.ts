@@ -3,6 +3,7 @@ import type { AppEnv } from "../app-types.js";
 import { jsonb, sql } from "../db/index.js";
 import { AgentConfig, AgentConfigPatch, type AgentConfigT } from "../lib/agent-config.js";
 import { AppError, badRequest } from "../lib/errors.js";
+import { parseBody, parseOrThrow } from "../lib/http.js";
 import { newId } from "../lib/id.js";
 import { createWebSession } from "../lib/sessions.js";
 
@@ -47,12 +48,11 @@ async function assertToolsOwned(project: string, toolIds: string[]): Promise<voi
 
 agents.post("/agents", async (c) => {
 	const key = c.get("apiKey");
-	const parsed = AgentConfig.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) {
-		const issue = parsed.error.issues[0];
-		throw badRequest(`Invalid agent config: ${issue?.path.join(".")} — ${issue?.message}`);
-	}
-	const config = parsed.data;
+	const config = await parseBody(
+		c,
+		AgentConfig,
+		(issue) => `Invalid agent config: ${issue?.path.join(".")} — ${issue?.message}`,
+	);
 	await assertToolsOwned(key.project, config.toolIds);
 
 	const id = newId("agt");
@@ -90,19 +90,18 @@ agents.patch("/agents/:id", async (c) => {
 	const agent = await getAgent(key.project, c.req.param("id"));
 	if (!agent) throw notFound();
 
-	const parsed = AgentConfigPatch.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) {
-		const issue = parsed.error.issues[0];
-		throw badRequest(`Invalid agent config patch: ${issue?.path.join(".")} — ${issue?.message}`);
-	}
+	const patch = await parseBody(
+		c,
+		AgentConfigPatch,
+		(issue) => `Invalid agent config patch: ${issue?.path.join(".")} — ${issue?.message}`,
+	);
 
 	// Merge the patch over the stored config, then re-validate the whole thing.
-	const merged = AgentConfig.safeParse({ ...agent.config, ...parsed.data });
-	if (!merged.success) {
-		const issue = merged.error.issues[0];
-		throw badRequest(`Merged config invalid: ${issue?.path.join(".")} — ${issue?.message}`);
-	}
-	const config = merged.data;
+	const config = parseOrThrow(
+		AgentConfig,
+		{ ...agent.config, ...patch },
+		(issue) => `Merged config invalid: ${issue?.path.join(".")} — ${issue?.message}`,
+	);
 	await assertToolsOwned(key.project, config.toolIds);
 
 	const nextVersion = agent.version + 1;

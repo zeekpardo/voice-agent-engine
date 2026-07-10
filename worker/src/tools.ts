@@ -10,6 +10,14 @@ import { reportEvent } from "./gateway.js";
  * with the per-tool secret. The engine runs no business logic.
  */
 
+/**
+ * Same HMAC scheme as packages/shared/src/hmac.ts (signPayload) and
+ * kit/src/agent/server.ts (verifySignature) — duplicated here on purpose:
+ * `lk agent deploy` builds this worker's Docker image from the worker/
+ * directory alone (see worker/Dockerfile, which `pnpm install`s before the
+ * rest of the repo is even copied in), so it has no access to sibling
+ * workspace packages. Keep this in sync by hand if the scheme ever changes.
+ */
 function sign(secret: string, timestamp: string, body: string): string {
 	return createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
 }

@@ -2,8 +2,9 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
 import { jsonb, sql } from "../db/index.js";
-import { AppError, badRequest } from "../lib/errors.js";
-import { newId } from "../lib/id.js";
+import { logCallEvent } from "../lib/call-events.js";
+import { AppError } from "../lib/errors.js";
+import { parseBody } from "../lib/http.js";
 import { createOutboundCall } from "../lib/outbound.js";
 import { agentRuntime } from "../providers/agent-runtime/index.js";
 import { getAgent } from "./agents.js";
@@ -34,12 +35,11 @@ const OutboundBody = z.object({
 
 calls.post("/calls", async (c) => {
 	const key = c.get("apiKey");
-	const parsed = OutboundBody.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) {
-		const issue = parsed.error.issues[0];
-		throw badRequest(`Invalid call: ${issue?.path.join(".")} — ${issue?.message}`);
-	}
-	const body = parsed.data;
+	const body = await parseBody(
+		c,
+		OutboundBody,
+		(issue) => `Invalid call: ${issue?.path.join(".")} — ${issue?.message}`,
+	);
 
 	const agent = await getAgent(key.project, body.agent_id);
 	if (!agent) throw new AppError(404, "not_found", "Agent not found");
@@ -100,10 +100,9 @@ calls.patch("/calls/:id/metadata", async (c) => {
 	const call = await getCall(key.project, c.req.param("id"));
 	if (!call) throw notFound();
 
-	const parsed = MetadataPatch.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) throw badRequest("Body must be { metadata: object }");
+	const patch = await parseBody(c, MetadataPatch, () => "Body must be { metadata: object }");
 
-	const merged = { ...((call.metadata as Record<string, unknown>) ?? {}), ...parsed.data.metadata };
+	const merged = { ...((call.metadata as Record<string, unknown>) ?? {}), ...patch.metadata };
 	await sql`
 		UPDATE calls SET metadata = ${jsonb(merged)}, updated_at = now() WHERE id = ${call.id as string}`;
 	return c.json({ id: call.id, metadata: merged });
@@ -146,8 +145,6 @@ calls.post("/calls/:id/cancel", async (c) => {
 	await sql`
 		UPDATE calls SET status = 'canceled', ended_at = now(), end_reason = 'canceled', updated_at = now()
 		WHERE id = ${call.id as string}`;
-	await sql`
-		INSERT INTO call_events (id, call_id, type, payload)
-		VALUES (${newId("cev")}, ${call.id as string}, 'call.canceled', '{}')`;
+	await logCallEvent(sql, { callId: call.id as string, type: "call.canceled" });
 	return c.json({ canceled: true, id: call.id });
 });

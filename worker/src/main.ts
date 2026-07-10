@@ -325,6 +325,11 @@ export default defineAgent({
 		if (config.flow) {
 			const flow = config.flow;
 			const nodesById = new Map(flow.nodes.map((n) => [n.id, n]));
+			// Same slug scheme as packages/shared/src/slugify.ts (used by
+			// src/lib/agent-config.ts) — duplicated here on purpose: `lk agent
+			// deploy` builds this worker's Docker image from the worker/
+			// directory alone, so it has no access to sibling workspace
+			// packages. Keep this in sync by hand if the scheme ever changes.
 			const sanitize = (s: string) =>
 				s
 					.toLowerCase()

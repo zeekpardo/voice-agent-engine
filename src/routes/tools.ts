@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
 import { jsonb, sql } from "../db/index.js";
 import { AppError, badRequest } from "../lib/errors.js";
+import { parseBody } from "../lib/http.js";
 import { newId } from "../lib/id.js";
 
 /**
@@ -34,12 +35,11 @@ const PUBLIC_COLS = sql`id, name, description, json_schema, endpoint_url, timeou
 
 tools.post("/tools", async (c) => {
 	const key = c.get("apiKey");
-	const parsed = ToolBody.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) {
-		const issue = parsed.error.issues[0];
-		throw badRequest(`Invalid tool: ${issue?.path.join(".")} — ${issue?.message}`);
-	}
-	const t = parsed.data;
+	const t = await parseBody(
+		c,
+		ToolBody,
+		(issue) => `Invalid tool: ${issue?.path.join(".")} — ${issue?.message}`,
+	);
 	const id = newId("tool");
 	const secret = `whsec_${randomBytes(24).toString("base64url")}`;
 
@@ -78,12 +78,11 @@ tools.patch("/tools/:id", async (c) => {
 		SELECT id FROM tools WHERE id = ${c.req.param("id")} AND project = ${key.project}`;
 	if (!rows[0]) throw notFound();
 
-	const parsed = ToolBody.partial().safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) {
-		const issue = parsed.error.issues[0];
-		throw badRequest(`Invalid tool patch: ${issue?.path.join(".")} — ${issue?.message}`);
-	}
-	const t = parsed.data;
+	const t = await parseBody(
+		c,
+		ToolBody.partial(),
+		(issue) => `Invalid tool patch: ${issue?.path.join(".")} — ${issue?.message}`,
+	);
 
 	await sql`
 		UPDATE tools SET

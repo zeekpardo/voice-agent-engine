@@ -1,8 +1,8 @@
 import { jsonb, sql } from "../db/index.js";
 import { agentRuntime } from "../providers/agent-runtime/index.js";
 import type { AgentRow } from "../routes/agents.js";
+import { logCallEvent } from "./call-events.js";
 import { newId } from "./id.js";
-import { emitEvent } from "./webhooks.js";
 
 export interface CreateWebSessionInput {
 	project: string;
@@ -49,16 +49,20 @@ export async function createWebSession(input: CreateWebSessionInput): Promise<We
 		},
 	});
 
-	await sql`
-		INSERT INTO call_events (id, call_id, type, payload)
-		VALUES (${newId("cev")}, ${callId}, 'call.queued', ${sql.json({ direction: "web" })})`;
-	void emitEvent(input.project, {
-		type: "call.queued",
-		call_id: callId,
-		agent_id: input.agent.id,
-		direction: "web",
-		metadata,
-	});
+	await logCallEvent(
+		sql,
+		{ callId, type: "call.queued", payload: { direction: "web" } },
+		{
+			project: input.project,
+			event: {
+				type: "call.queued",
+				call_id: callId,
+				agent_id: input.agent.id,
+				direction: "web",
+				metadata,
+			},
+		},
+	);
 
 	return {
 		call_id: callId,

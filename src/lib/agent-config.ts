@@ -1,3 +1,4 @@
+import { slugify } from "@voice-engine/shared/slugify";
 import { z } from "zod";
 
 /**
@@ -207,11 +208,7 @@ export const AgentConfig = z.object({
 		.optional()
 		.superRefine((flow, ctx) => {
 			if (!flow) return;
-			const sanitize = (s: string) =>
-				s
-					.toLowerCase()
-					.replace(/[^a-z0-9]+/g, "_")
-					.replace(/^_+|_+$/g, "");
+			const sanitize = slugify;
 			const ids = new Set(flow.nodes.map((n) => n.id));
 			if (ids.size !== flow.nodes.length) {
 				ctx.addIssue({ code: "custom", message: "flow.nodes ids must be unique" });

@@ -3,7 +3,8 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
 import { sql } from "../db/index.js";
-import { AppError, badRequest } from "../lib/errors.js";
+import { AppError } from "../lib/errors.js";
+import { parseBody } from "../lib/http.js";
 import { newId } from "../lib/id.js";
 
 /**
@@ -36,17 +37,17 @@ const WebhookBody = z.object({
 
 webhooks.post("/webhooks", async (c) => {
 	const key = c.get("apiKey");
-	const parsed = WebhookBody.safeParse(await c.req.json().catch(() => null));
-	if (!parsed.success) {
-		const issue = parsed.error.issues[0];
-		throw badRequest(`Invalid webhook: ${issue?.path.join(".")} — ${issue?.message}`);
-	}
+	const body = await parseBody(
+		c,
+		WebhookBody,
+		(issue) => `Invalid webhook: ${issue?.path.join(".")} — ${issue?.message}`,
+	);
 	const id = newId("wh");
 	const secret = `whsec_${randomBytes(24).toString("base64url")}`;
 	await sql`
 		INSERT INTO webhook_endpoints (id, project, url, secret, event_filter)
-		VALUES (${id}, ${key.project}, ${parsed.data.url}, ${secret}, ${parsed.data.event_filter})`;
-	return c.json({ id, url: parsed.data.url, event_filter: parsed.data.event_filter, secret }, 201);
+		VALUES (${id}, ${key.project}, ${body.url}, ${secret}, ${body.event_filter})`;
+	return c.json({ id, url: body.url, event_filter: body.event_filter, secret }, 201);
 });
 
 webhooks.get("/webhooks", async (c) => {

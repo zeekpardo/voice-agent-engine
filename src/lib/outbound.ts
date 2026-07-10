@@ -1,8 +1,8 @@
 import { jsonb, sql } from "../db/index.js";
 import { agentRuntime } from "../providers/agent-runtime/index.js";
 import type { AgentRow } from "../routes/agents.js";
+import { logCallEvent } from "./call-events.js";
 import { newId } from "./id.js";
-import { emitEvent } from "./webhooks.js";
 
 /**
  * Outbound call dispatch (spec §5 POST /v1/calls). A call row is created
@@ -35,18 +35,22 @@ export async function createOutboundCall(input: CreateOutboundInput) {
 		        ${input.scheduledAt ?? null},
 		        ${jsonb(input.variables ?? {})}, ${jsonb(input.metadata ?? {})})`;
 
-	await sql`
-		INSERT INTO call_events (id, call_id, type, payload)
-		VALUES (${newId("cev")}, ${callId}, ${scheduled ? "call.scheduled" : "call.queued"},
-		        ${jsonb({ to: input.to })})`;
-	void emitEvent(input.project, {
-		type: scheduled ? "call.scheduled" : "call.queued",
-		call_id: callId,
-		agent_id: input.agent.id,
-		to: input.to,
-		scheduled_at: input.scheduledAt?.toISOString() ?? null,
-		metadata: input.metadata ?? {},
-	});
+	const eventType = scheduled ? "call.scheduled" : "call.queued";
+	await logCallEvent(
+		sql,
+		{ callId, type: eventType, payload: { to: input.to } },
+		{
+			project: input.project,
+			event: {
+				type: eventType,
+				call_id: callId,
+				agent_id: input.agent.id,
+				to: input.to,
+				scheduled_at: input.scheduledAt?.toISOString() ?? null,
+				metadata: input.metadata ?? {},
+			},
+		},
+	);
 
 	if (!scheduled) {
 		await dispatchOutbound(callId);
@@ -78,25 +82,30 @@ export async function dispatchOutbound(callId: string): Promise<void> {
 				metadata: (call.metadata ?? {}) as Record<string, unknown>,
 			},
 		});
-		await sql`
-			INSERT INTO call_events (id, call_id, type, payload)
-			VALUES (${newId("cev")}, ${callId}, 'call.dialing', ${jsonb({ to: call.to_number })})`;
+		await logCallEvent(sql, { callId, type: "call.dialing", payload: { to: call.to_number } });
 	} catch (err) {
 		console.error(`outbound dispatch failed for ${callId}:`, err);
 		await sql`
 			UPDATE calls SET status = 'failed', end_reason = 'dispatch_failed', ended_at = now(), updated_at = now()
 			WHERE id = ${callId}`;
-		await sql`
-			INSERT INTO call_events (id, call_id, type, payload)
-			VALUES (${newId("cev")}, ${callId}, 'call.failed',
-			        ${jsonb({ error: err instanceof Error ? err.message : String(err) })})`;
-		void emitEvent(call.project as string, {
-			type: "call.failed",
-			call_id: callId,
-			agent_id: call.agent_id as string,
-			end_reason: "dispatch_failed",
-			metadata: call.metadata,
-		});
+		await logCallEvent(
+			sql,
+			{
+				callId,
+				type: "call.failed",
+				payload: { error: err instanceof Error ? err.message : String(err) },
+			},
+			{
+				project: call.project as string,
+				event: {
+					type: "call.failed",
+					call_id: callId,
+					agent_id: call.agent_id as string,
+					end_reason: "dispatch_failed",
+					metadata: call.metadata,
+				},
+			},
+		);
 	}
 }
 
