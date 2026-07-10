@@ -46,6 +46,50 @@ async function assertToolsOwned(project: string, toolIds: string[]): Promise<voi
 	}
 }
 
+/**
+ * The single update path shared by PATCH, publish, and restore: merge a partial
+ * config over the agent's current config, re-validate the merged whole, snapshot
+ * the new config into agent_versions and bump the agent's version. Optionally
+ * clears the stored draft atomically (publish). Returns the fresh agent row.
+ */
+async function bumpAgentVersion(
+	project: string,
+	agent: AgentRow,
+	patch: Record<string, unknown>,
+	opts: { clearDraft?: boolean } = {},
+): Promise<AgentRow | null> {
+	// Merge the patch over the stored config, then re-validate the whole thing.
+	const config = parseOrThrow(
+		AgentConfig,
+		{ ...agent.config, ...patch },
+		(issue) => `Merged config invalid: ${issue?.path.join(".")} — ${issue?.message}`,
+	);
+	await assertToolsOwned(project, config.toolIds);
+
+	const nextVersion = agent.version + 1;
+	await sql.begin(async (tx) => {
+		if (opts.clearDraft) {
+			await tx`
+				UPDATE agents
+				SET config = ${jsonb(config)}, name = ${config.name},
+				    version = ${nextVersion}, updated_at = now(),
+				    draft = NULL, draft_updated_at = NULL
+				WHERE id = ${agent.id}`;
+		} else {
+			await tx`
+				UPDATE agents
+				SET config = ${jsonb(config)}, name = ${config.name},
+				    version = ${nextVersion}, updated_at = now()
+				WHERE id = ${agent.id}`;
+		}
+		await tx`
+			INSERT INTO agent_versions (agent_id, version, config)
+			VALUES (${agent.id}, ${nextVersion}, ${jsonb(config)})`;
+	});
+
+	return getAgent(project, agent.id);
+}
+
 agents.post("/agents", async (c) => {
 	const key = c.get("apiKey");
 	const config = await parseBody(
@@ -96,27 +140,7 @@ agents.patch("/agents/:id", async (c) => {
 		(issue) => `Invalid agent config patch: ${issue?.path.join(".")} — ${issue?.message}`,
 	);
 
-	// Merge the patch over the stored config, then re-validate the whole thing.
-	const config = parseOrThrow(
-		AgentConfig,
-		{ ...agent.config, ...patch },
-		(issue) => `Merged config invalid: ${issue?.path.join(".")} — ${issue?.message}`,
-	);
-	await assertToolsOwned(key.project, config.toolIds);
-
-	const nextVersion = agent.version + 1;
-	await sql.begin(async (tx) => {
-		await tx`
-			UPDATE agents
-			SET config = ${jsonb(config)}, name = ${config.name},
-			    version = ${nextVersion}, updated_at = now()
-			WHERE id = ${agent.id}`;
-		await tx`
-			INSERT INTO agent_versions (agent_id, version, config)
-			VALUES (${agent.id}, ${nextVersion}, ${jsonb(config)})`;
-	});
-
-	return c.json(await getAgent(key.project, agent.id));
+	return c.json(await bumpAgentVersion(key.project, agent, patch));
 });
 
 agents.delete("/agents/:id", async (c) => {
@@ -125,6 +149,110 @@ agents.delete("/agents/:id", async (c) => {
 	if (!agent) throw notFound();
 	await sql`UPDATE agents SET status = 'deleted', updated_at = now() WHERE id = ${agent.id}`;
 	return c.json({ deleted: true, id: agent.id });
+});
+
+// ── Drafts ──────────────────────────────────────────────────────────────────
+// A draft is a gateway-internal PARTIAL config overlay the builder UI edits
+// before publishing. It is stored as-is and is NEVER dispatched — dispatch
+// reads agents.config only. Publishing merges the draft over the live config
+// as a new version (the same path as PATCH) and clears the draft.
+
+// Save/replace the working draft. Body is a partial config; stored as-is.
+agents.put("/agents/:id/draft", async (c) => {
+	const key = c.get("apiKey");
+	const agent = await getAgent(key.project, c.req.param("id"));
+	if (!agent) throw notFound();
+
+	const draft = await parseBody(
+		c,
+		AgentConfigPatch,
+		(issue) => `Invalid draft config: ${issue?.path.join(".")} — ${issue?.message}`,
+	);
+
+	const rows = await sql`
+		UPDATE agents
+		SET draft = ${jsonb(draft)}, draft_updated_at = now()
+		WHERE id = ${agent.id}
+		RETURNING draft_updated_at`;
+	return c.json({ updated_at: rows[0]?.draft_updated_at });
+});
+
+agents.get("/agents/:id/draft", async (c) => {
+	const key = c.get("apiKey");
+	const rows = await sql`
+		SELECT draft, draft_updated_at FROM agents
+		WHERE id = ${c.req.param("id")} AND project = ${key.project} AND status != 'deleted'`;
+	const row = rows[0];
+	if (!row || row.draft == null) throw notFound();
+	return c.json({ config: row.draft, updated_at: row.draft_updated_at });
+});
+
+// Idempotent: 200 even when there was no draft to discard.
+agents.delete("/agents/:id/draft", async (c) => {
+	const key = c.get("apiKey");
+	const agent = await getAgent(key.project, c.req.param("id"));
+	if (!agent) throw notFound();
+	await sql`
+		UPDATE agents SET draft = NULL, draft_updated_at = NULL WHERE id = ${agent.id}`;
+	return c.json({ discarded: true });
+});
+
+// Publish the stored draft: merge it over the live config as a new version
+// (same path as PATCH) and clear the draft. 409 when there is no draft.
+agents.post("/agents/:id/publish", async (c) => {
+	const key = c.get("apiKey");
+	const rows = await sql`
+		SELECT draft FROM agents
+		WHERE id = ${c.req.param("id")} AND project = ${key.project} AND status != 'deleted'`;
+	const agent = await getAgent(key.project, c.req.param("id"));
+	if (!agent) throw notFound();
+	const draft = rows[0]?.draft as Record<string, unknown> | null | undefined;
+	if (draft == null) {
+		throw new AppError(409, "no_draft", "No draft to publish");
+	}
+	return c.json(await bumpAgentVersion(key.project, agent, draft, { clearDraft: true }));
+});
+
+// ── Versions ────────────────────────────────────────────────────────────────
+
+// Newest-first list, includes the current version.
+agents.get("/agents/:id/versions", async (c) => {
+	const key = c.get("apiKey");
+	const agent = await getAgent(key.project, c.req.param("id"));
+	if (!agent) throw notFound();
+	const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 50) || 50, 1), 200);
+	const rows = await sql`
+		SELECT version, created_at FROM agent_versions
+		WHERE agent_id = ${agent.id}
+		ORDER BY version DESC
+		LIMIT ${limit}`;
+	return c.json({ versions: rows });
+});
+
+agents.get("/agents/:id/versions/:v", async (c) => {
+	const key = c.get("apiKey");
+	const agent = await getAgent(key.project, c.req.param("id"));
+	if (!agent) throw notFound();
+	const rows = await sql`
+		SELECT version, config, created_at FROM agent_versions
+		WHERE agent_id = ${agent.id} AND version = ${Number(c.req.param("v"))}`;
+	if (!rows[0]) throw notFound();
+	return c.json(rows[0]);
+});
+
+// Restore a prior snapshot: apply its config through the same update path,
+// producing a fresh version + snapshot.
+agents.post("/agents/:id/versions/:v/restore", async (c) => {
+	const key = c.get("apiKey");
+	const agent = await getAgent(key.project, c.req.param("id"));
+	if (!agent) throw notFound();
+	const rows = await sql`
+		SELECT config FROM agent_versions
+		WHERE agent_id = ${agent.id} AND version = ${Number(c.req.param("v"))}`;
+	if (!rows[0]) throw notFound();
+	return c.json(
+		await bumpAgentVersion(key.project, agent, rows[0].config as Record<string, unknown>),
+	);
 });
 
 // Spin up a browser test session for this agent (returns room url + token).

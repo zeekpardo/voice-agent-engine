@@ -196,6 +196,15 @@ const MIGRATIONS: { version: number; name: string; up: string }[] = [
 		// every existing row backfills to voice and old dispatches are unaffected.
 		up: `ALTER TABLE calls ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'voice';`,
 	},
+	{
+		version: 6,
+		name: "agents-draft",
+		// Gateway-internal draft overlay for the builder UI (never dispatched).
+		// A partial config the SaaS PUTs while editing; publish merges it over the
+		// live config as a new version and clears these columns. Nullable: agents
+		// without an in-progress draft stay NULL and dispatch reads `config` only.
+		up: `ALTER TABLE agents ADD COLUMN IF NOT EXISTS draft JSONB, ADD COLUMN IF NOT EXISTS draft_updated_at TIMESTAMPTZ;`,
+	},
 ];
 
 /** Apply pending migrations on boot. */
