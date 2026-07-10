@@ -151,6 +151,13 @@ export const AgentConfig = z.object({
 	 */
 	personaId: z.string().nullish(),
 
+	/**
+	 * Raw guardrails text authored in the SaaS builder. Compiled into
+	 * `instructions` (## GUARDRAILS) at save time; the engine never reads the
+	 * raw field — it rides along so the builder can re-edit it.
+	 */
+	guardrails: z.string().nullish(),
+
 	// Multi-node flow (canvas-built agents). When present, the call runs as a
 	// graph of small agents: each node has its own instructions and gated
 	// tools, and moves to another node (or ends the call) through its exits.
