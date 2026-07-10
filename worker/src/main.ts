@@ -20,6 +20,7 @@ import {
 	interpolateSpoken,
 } from "./flow/context.js";
 import { createAgentBuilder } from "./flow/agent-builder.js";
+import { createMemoryTracker } from "./flow/memory.js";
 import { type ObjectivesTracker, createObjectivesTracker } from "./flow/objectives.js";
 import { createRouter } from "./flow/router.js";
 import { createTransfer } from "./flow/transfer.js";
@@ -89,6 +90,16 @@ export default defineAgent({
 		// writes (objectives / set_field) upsert into it so the next node's prompt
 		// rebuild reflects the new value. Never re-fetched mid-call.
 		const contactState = dispatch.contactState ? [...dispatch.contactState] : [];
+		// Rolling in-call memory (Phase 3). Resolve config.memory with defaults —
+		// ON unless explicitly disabled. `rollingSummary` is a stable-reference
+		// mutable holder shared into agent-builder (renders it) and memory.ts (writes it).
+		const memory = {
+			enabled: config.memory?.enabled !== false,
+			intervalTurns: config.memory?.intervalTurns ?? 10,
+			windowTurns: config.memory?.windowTurns ?? 20,
+			model: config.memory?.model,
+		};
+		const rollingSummary = { text: "" };
 
 		// Global blocks shared by every node/agent (CloseBot "Job Information"
 		// + "Prohibited Words"): the root instructions are written ONCE and
@@ -139,6 +150,8 @@ export default defineAgent({
 			completed: false,
 			transferInFlight: false,
 			ttsOverride: undefined,
+			conversationTimer: undefined,
+			auxUsage: { llmIn: 0, llmOut: 0 },
 		};
 
 		const EMPTY_PARAMS = {
@@ -190,6 +203,9 @@ export default defineAgent({
 		// Set by the flow branch when objective-driven nodes exist; invoked from
 		// the session's ConversationItemAdded listener on every caller turn.
 		let objectiveUserTurnHook: (() => void) | undefined;
+		// Set by the flow branch when rolling memory is enabled; a second
+		// per-caller-turn hook alongside objectiveUserTurnHook.
+		let memoryUserTurnHook: (() => void) | undefined;
 
 		if (config.flow) {
 			const flow = config.flow;
@@ -215,6 +231,8 @@ export default defineAgent({
 				nodesById,
 				turns,
 				contactState,
+				rollingSummary,
+				memory,
 				get session() {
 					// Constructed by session-lifecycle (after the flow wiring);
 					// only read at call time, never during wiring.
@@ -273,6 +291,26 @@ export default defineAgent({
 			});
 			objectiveUserTurnHook = () => objectivesTracker.onUserTurn();
 
+			// Rolling memory (Phase 3): a second per-caller-turn hook alongside the
+			// objective judge. Summary generation is fully async and never blocks
+			// speech; its standalone summary-call usage folds into state.auxUsage,
+			// which session-lifecycle adds to the completion meters.
+			if (memory.enabled) {
+				const memoryTracker = createMemoryTracker({
+					dispatch,
+					turns,
+					rollingSummary,
+					memory,
+					buildLlm,
+					getSession: () => state.session,
+					recordUsage: (inTok, outTok) => {
+						state.auxUsage.llmIn += inTok;
+						state.auxUsage.llmOut += outTok;
+					},
+				});
+				memoryUserTurnHook = () => memoryTracker.onUserTurn();
+			}
+
 			agent = buildFlowAgent(flow.entry);
 		} else {
 			const tools = buildTools(bundle.tools, dispatch);
@@ -296,6 +334,7 @@ export default defineAgent({
 			greeting,
 			isInbound: !!rawMetadata.inbound,
 			objectiveUserTurnHook,
+			memoryUserTurnHook,
 		});
 	},
 });

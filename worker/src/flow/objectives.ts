@@ -147,8 +147,13 @@ function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promi
 }
 
 export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
-	const { dispatch, turns, contactState, session, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, hangUp, isCompleted } =
+	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, hangUp, isCompleted } =
 		deps;
+	// `session` is a LAZY getter on deps (the AgentSession is built after this
+	// factory wires up) — it MUST be read fresh via deps.session at call time.
+	// Destructuring it here would capture `undefined` (the value during wiring)
+	// and every transition would crash on `session.agentState`.
+	const getSession = () => deps.session;
 	const defaultJudgeLlm = buildLlm({ model: "grok-4-fast", temperature: 0, maxTokens: 400 });
 
 	let activeObjectives: ObjectiveRuntime | null = null;
@@ -275,6 +280,7 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 		void (async () => {
 			// Never cut the agent off mid-sentence: transition at the next turn
 			// boundary (agent back to listening).
+			const session = getSession();
 			await waitForAgentIdle(session, 15_000);
 			// A scenario/secondary exit (or hangup) may have moved the call on.
 			if (isCompleted() || activeObjectives !== rt) return;

@@ -171,6 +171,32 @@ export const AgentConfig = z.object({
 							})
 							.optional(),
 						instructions: z.string().min(1),
+						/**
+						 * Conversation mode (Phase 2 — CloseBot's objective-less "keep the
+						 * conversation going" node). When present, the node runs as an agent
+						 * that self-drives open-ended discovery from `reason` (+ optional
+						 * `hints` as talking points) with NO objectives block and NO
+						 * objective judge; it wraps up warmly and closes when the caller
+						 * disengages. `wrapUp` fixes how it closes: `end_call` hangs up via
+						 * the end_call tool; `exit` takes the named node exit (matched to an
+						 * `exits[].name`). `maxDurationSeconds` arms a soft per-node timer
+						 * that nudges a wrap-up on expiry. Mutually exclusive with
+						 * `objectives`. */
+						conversation: z
+							.object({
+								/** Why this open-ended conversation exists — the discovery seed. */
+								reason: z.string().min(1),
+								/** Optional talking points the agent may explore (not a checklist). */
+								hints: z.array(z.string().min(1)).optional(),
+								/** How the node closes when the caller disengages. */
+								wrapUp: z.discriminatedUnion("mode", [
+									z.object({ mode: z.literal("end_call") }),
+									z.object({ mode: z.literal("exit"), exit: z.string().min(1) }),
+								]),
+								/** Soft cap: on expiry the agent is nudged to wrap up (never a hard cut). */
+								maxDurationSeconds: z.number().int().positive().optional(),
+							})
+							.optional(),
 						/** Agent-only: engine-verified data goals. When present, the
 						 * node's primary exit (exits[0]) is taken by the ENGINE once a
 						 * judge pass confirms every required objective — the
@@ -302,6 +328,29 @@ export const AgentConfig = z.object({
 							code: "custom",
 							message: `node "${node.id}" objective keys must be unique`,
 						});
+					}
+				}
+				if (node.conversation) {
+					if (node.kind !== "agent") {
+						ctx.addIssue({
+							code: "custom",
+							message: `node "${node.id}" has a conversation block but is a ${node.kind} — only agent nodes converse`,
+						});
+					}
+					if (node.objectives?.length) {
+						ctx.addIssue({
+							code: "custom",
+							message: `node "${node.id}" cannot have both conversation and objectives — a conversation node is objective-less by design`,
+						});
+					}
+					if (node.conversation.wrapUp.mode === "exit") {
+						const exitName = node.conversation.wrapUp.exit;
+						if (!node.exits.some((e) => e.name === exitName)) {
+							ctx.addIssue({
+								code: "custom",
+								message: `node "${node.id}" conversation wrapUp exit "${exitName}" does not match any of the node's exits`,
+							});
+						}
 					}
 				}
 				if (node.kind === "set_field") {
@@ -439,6 +488,29 @@ export const AgentConfig = z.object({
 			extract: z.record(z.string()).optional(),
 		})
 		.default({}),
+
+	/**
+	 * Rolling in-call memory (Phase 3 — CloseBot's regenerated `<conversation
+	 * summary>`). Every `intervalTurns` caller turns a cheap async model call
+	 * condenses the turns OLDER than the live `windowTurns` window into a bullet
+	 * summary, injected into every node prompt as `## CONVERSATION SO FAR`; the
+	 * responder's chat history is compacted to that summary + the last
+	 * `windowTurns` verbatim turns so per-turn cost plateaus instead of growing.
+	 * The full transcript buffer (for flush) and the objectives judge window are
+	 * NEVER compacted — only what the responder model sees. Omitted → defaults
+	 * (memory ON); set `enabled:false` to disable entirely.
+	 */
+	memory: z
+		.object({
+			enabled: z.boolean().default(true),
+			/** Caller turns between summary refreshes. */
+			intervalTurns: z.number().int().positive().default(10),
+			/** Verbatim turns kept alongside the summary (the responder's live window). */
+			windowTurns: z.number().int().positive().default(20),
+			/** Summary model; defaults to the cheap judge-tier model. */
+			model: z.string().min(1).optional(),
+		})
+		.optional(),
 });
 
 export type AgentConfigT = z.infer<typeof AgentConfig>;

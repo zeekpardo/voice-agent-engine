@@ -1,5 +1,5 @@
-import type { JobContext, inference, llm, voice } from "@livekit/agents";
-import { inference as inferenceNs } from "@livekit/agents";
+import type { JobContext, inference, voice } from "@livekit/agents";
+import { inference as inferenceNs, llm } from "@livekit/agents";
 import type { JSONSchema7 } from "json-schema";
 import type {
 	AgentBundle,
@@ -154,6 +154,23 @@ export interface FlowRuntimeState {
 	transferInFlight: boolean;
 	/** Post-transfer voice: applied to every agent built after the switch. */
 	ttsOverride?: TtsInstance;
+	/** Soft per-node wrap-up timer for a conversation node's maxDurationSeconds
+	 * (Phase 2). Re-armed on every node entry (cleared first) and on teardown, so
+	 * at most one is ever live. */
+	conversationTimer?: ReturnType<typeof setTimeout>;
+	/** Auxiliary LLM usage NOT captured by the session's own MetricsCollected —
+	 * the standalone rolling-summary (and future off-session) calls fold their
+	 * token counts here so session-lifecycle can add them to the completion
+	 * meters (Phase 3 metering). */
+	auxUsage: { llmIn: number; llmOut: number };
+}
+
+/** Resolved rolling-memory settings (config.memory with defaults applied). */
+export interface ResolvedMemory {
+	enabled: boolean;
+	intervalTurns: number;
+	windowTurns: number;
+	model?: string;
 }
 
 /**
@@ -182,6 +199,16 @@ export interface FlowRuntimeContext {
 	 * carried none.
 	 */
 	contactState: ContactStateEntryT[];
+
+	/**
+	 * Rolling in-call summary holder (Phase 3). A stable-reference mutable object
+	 * (like contactState): flow/memory.ts writes `.text` after each async refresh,
+	 * agent-builder reads it into every node's `## CONVERSATION SO FAR` block.
+	 * Empty string until the first interval fires; a stale value is always fine.
+	 */
+	rollingSummary: { text: string };
+	/** Resolved rolling-memory settings (config.memory + defaults). */
+	memory: ResolvedMemory;
 
 	// lazy runtime, owned by session-lifecycle
 	readonly session: voice.AgentSession;
@@ -249,4 +276,40 @@ export function upsertContactState(
 		// list: fall back to the raw key so the prompt still reads sensibly.
 		list.push({ key, label: label ?? key, value });
 	}
+}
+
+/**
+ * Rolling-memory compaction (Phase 3): cap what the RESPONDER model sees to the
+ * last `windowTurns` verbatim conversational turns. The condensed older context
+ * rides in the prompt's `## CONVERSATION SO FAR` block instead. Mutates the
+ * ChatContext in place (LiveKit's `truncate` splices `_items`).
+ *
+ * CRITICAL: this touches ONLY a responder-facing ChatContext. The full `turns`
+ * buffer (transcript flush) and the objectives judge window (which read from
+ * `turns`, never from this ChatContext) stay COMPLETE. `truncate` keeps the last
+ * N items, drops any leading orphaned tool call/output, and preserves a system
+ * message — so the current node's most recent, unanswered turns are never
+ * dropped. No-op when history already fits (or windowTurns ≤ 0).
+ *
+ * `windowTurns` counts conversational MESSAGES (user/assistant); we translate it
+ * to the item count that spans the last `windowTurns` messages (tool call/output
+ * items in that span are kept with their message).
+ */
+export function compactChatContext(chatCtx: llm.ChatContext, windowTurns: number): void {
+	if (windowTurns <= 0) return;
+	const items = chatCtx.items;
+	let messages = 0;
+	let keepFrom = 0;
+	for (let i = items.length - 1; i >= 0; i--) {
+		if (items[i]!.type === "message" && (items[i] as llm.ChatMessage).role !== "system") {
+			messages++;
+			if (messages >= windowTurns) {
+				keepFrom = i;
+				break;
+			}
+		}
+	}
+	const keepCount = items.length - keepFrom;
+	if (keepCount >= items.length) return; // nothing older than the window
+	chatCtx.truncate(keepCount);
 }

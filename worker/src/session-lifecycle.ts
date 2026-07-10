@@ -78,6 +78,9 @@ export interface SessionLifecycleDeps {
 	/** Fired after each recorded caller turn (flow objective judging); absent
 	 * on the single-agent path. */
 	objectiveUserTurnHook?: () => void;
+	/** Fired after each recorded caller turn (rolling-summary refresh); absent
+	 * on the single-agent path or when memory is disabled. */
+	memoryUserTurnHook?: () => void;
 }
 
 const DEFAULT_DISCLOSURE = "Just so you know, you're speaking with an A.I. assistant.";
@@ -144,7 +147,10 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 		// Judge objectives off the hot path: fires AFTER the turn is recorded
 		// so the judge always sees the caller's latest words. Async — never
 		// delays the reply that's already generating.
-		if (role === "user" && text) deps.objectiveUserTurnHook?.();
+		if (role === "user" && text) {
+			deps.objectiveUserTurnHook?.();
+			deps.memoryUserTurnHook?.();
+		}
 	});
 
 	const usage = { llmIn: 0, llmOut: 0, ttsChars: 0, sttMs: 0 };
@@ -175,8 +181,10 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 			transcript: { turns },
 			usage: [
 				{ kind: "call_minutes", quantity: durationSeconds / 60 },
-				{ kind: "llm_tokens_in", quantity: usage.llmIn },
-				{ kind: "llm_tokens_out", quantity: usage.llmOut },
+				// Fold in standalone summary-call tokens (state.auxUsage) not seen by
+				// the session's own MetricsCollected, so rolling-memory cost is visible.
+				{ kind: "llm_tokens_in", quantity: usage.llmIn + state.auxUsage.llmIn },
+				{ kind: "llm_tokens_out", quantity: usage.llmOut + state.auxUsage.llmOut },
 				{ kind: "tts_characters", quantity: usage.ttsChars },
 				{ kind: "stt_seconds", quantity: usage.sttMs / 1000 },
 			],
@@ -237,6 +245,9 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	session.on(voice.AgentSessionEventTypes.Close, () => {
 		clearTimeout(maxCallTimer);
 		if (silenceTimer) clearTimeout(silenceTimer);
+		// A conversation node's soft wrap-up timer must not fire (generateReply)
+		// after the session is torn down.
+		if (state.conversationTimer) clearTimeout(state.conversationTimer);
 	});
 
 	// 7. Go live. Wait for the human before greeting: browsers join within

@@ -8,7 +8,7 @@ import { buildTools } from "../tools.js";
 // sees (`exit_${sanitize(name)}`) must equal the ids the gateway generated with
 // the same transform, so both sides MUST derive from this one source.
 import { slugify as sanitize } from "../vendor/slugify.js";
-import type { FlowRuntimeContext } from "./context.js";
+import { compactChatContext, type FlowRuntimeContext } from "./context.js";
 import type { ObjectivesTracker, ResolvedTarget } from "./objectives.js";
 
 /**
@@ -79,7 +79,28 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 			);
 		}
 
-		const objectives = node.objectives ?? [];
+		// Rolling-memory compaction on node handoff (Phase 3): cap the carried-over
+		// responder history to the last windowTurns verbatim turns; the condensed
+		// older context rides in the `## CONVERSATION SO FAR` block below. Only the
+		// responder-facing chatCtx is trimmed — `ctx.turns` (flush + judge) is untouched.
+		if (chatCtx && ctx.memory.enabled) {
+			const before = chatCtx.items.length;
+			compactChatContext(chatCtx, ctx.memory.windowTurns);
+			if (chatCtx.items.length < before) {
+				reportEvent(dispatch.callId, "flow.memory_compact", {
+					before,
+					after: chatCtx.items.length,
+					site: "handoff",
+					node: node.id,
+				});
+			}
+		}
+
+		// Conversation mode (Phase 2): objective-less, self-driven open-ended
+		// discovery. Mutually exclusive with objectives (schema-enforced).
+		const conversation = node.conversation;
+		const isConversation = !!conversation;
+		const objectives = isConversation ? [] : (node.objectives ?? []);
 		const hasObjectives = objectives.length > 0;
 
 		// KNOWN CONTACT INFO (Phase 1 — the UNRESOLVED block). Rendered fresh on
@@ -94,6 +115,34 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 						.map((e) => `${e.label} -> ${e.value != null && e.value !== "" ? e.value : "UNRESOLVED"}`)
 						.join("\n")}`
 				: "";
+
+		// Rolling summary (Phase 3): a condensed record of earlier turns, injected
+		// into EVERY node kind between the global/stage instructions and the KNOWN
+		// CONTACT INFO block. Empty until the first interval fires; a stale value is fine.
+		const summaryText = ctx.rollingSummary.text.trim();
+		const summaryBlock = summaryText
+			? `\n\n## CONVERSATION SO FAR\nEarlier parts of this call, condensed (the most recent exchanges are still verbatim in the conversation below). Use this for continuity — never re-ask something already covered here:\n${summaryText}`
+			: "";
+
+		// Conversation-mode blocks (Phase 2). The reason (+ optional hints) replaces
+		// the objectives block; closure is explicit rather than emergent.
+		const conversationReasonBlock = isConversation
+			? `\n\n## CONVERSATION REASON\n${ctx.interpolate(conversation!.reason)}${
+					conversation!.hints?.length
+						? `\n\nTalking points you can naturally explore (not a checklist — follow the caller's lead, one question at a time):\n${conversation!.hints
+								.map((h) => `- ${ctx.interpolate(h)}`)
+								.join("\n")}`
+						: ""
+				}`
+			: "";
+		const wrapUp = conversation?.wrapUp;
+		const closeAction =
+			wrapUp?.mode === "exit"
+				? `call the exit_${sanitize(wrapUp.exit)} tool to move on`
+				: "use the end_call tool to hang up";
+		const wrapUpBlock = isConversation
+			? `\n\n## WRAPPING UP\nYour DEFAULT is to KEEP THE CONVERSATION GOING: ask genuine, open-ended follow-up questions — ONE per reply — letting each answer lead naturally to the next angle. Do NOT wrap up just because a topic was covered; move to a fresh angle instead. Bring the call to a close ONLY when the CALLER clearly signals they are finished — they explicitly say they have nothing else or no more questions, they say goodbye, or they give repeated short, disengaged replies. When that clear signal comes, warmly acknowledge in ONE short line and then ${closeAction}. Never ask a question and end the call in the same reply: if you ask something, stop and wait for the answer.`
+			: "";
 
 		const nodeTools = buildTools(
 			bundle.tools.filter((t) => node.toolIds.includes(t.id as string)),
@@ -163,6 +212,7 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 			instructions:
 				ctx.globalInstructions +
 				`\n\n## YOUR CURRENT STAGE\n${ctx.interpolate(node.instructions)}` +
+				conversationReasonBlock +
 				(hasObjectives
 					? `\n\n## OBJECTIVES\nIn this stage you must learn the following from the caller, naturally and ONE question at a time:\n${objectives
 							.map(
@@ -175,8 +225,10 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 								"\n",
 							)}\nThe system verifies these automatically as the caller answers and advances the conversation to the next stage on its own — never announce a stage change or rush the caller, and do not save these specific values with tools; they are recorded automatically.`
 					: "") +
+				summaryBlock +
 				contactInfo +
-				(toolExits.length > 0
+				wrapUpBlock +
+				(!isConversation && toolExits.length > 0
 					? `\n\n## MOVING BETWEEN STAGES\nThis call flows through several stages and you handle ONLY this one. The moment the conversation satisfies an exit condition, call that exit tool (${exitNames}) IMMEDIATELY and SILENTLY. Changing stages is invisible to the caller: do NOT wrap up, do NOT say goodbye or "thanks for your time", do NOT announce a transfer or say you're passing them along — the very same voice simply continues the conversation.`
 					: "") +
 				(scenarios.length > 0
@@ -199,14 +251,42 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 			tools: nodeTools,
 			onEnter: (agentCtx) => {
 				reportEvent(dispatch.callId, "flow.node", { node: node.id, name: node.name ?? null });
+				// At most one conversation wrap-up timer is ever live: clear any timer
+				// armed by a previous node before (re)arming below.
+				if (ctx.state.conversationTimer) {
+					clearTimeout(ctx.state.conversationTimer);
+					ctx.state.conversationTimer = undefined;
+				}
 				// Arm (or disarm) the objective judge for this node. Rebuilt
 				// fresh on every entry — re-entering a node restarts its goals.
+				// Conversation nodes pass no objectives, so this always DISARMS the
+				// judge for them (objective tracker never fires in conversation mode).
 				getObjectivesTracker().arm({
 					id: node.id,
 					objectives,
 					judge: node.judge,
 					primaryExit: { name: node.exits[0]?.name ?? "end", target: node.exits[0]?.target },
 				});
+				// Conversation maxDurationSeconds (Phase 2): a SOFT cap. On expiry,
+				// nudge the agent to wrap up via a generated turn (the least invasive
+				// working mechanism — same generateReply path onEnter already uses;
+				// no mid-node instruction rebuild). Never a hard cut: the model still
+				// says a graceful line and then closes via end_call / the named exit.
+				if (isConversation && conversation!.maxDurationSeconds) {
+					ctx.state.conversationTimer = setTimeout(() => {
+						ctx.state.conversationTimer = undefined;
+						const sess = ctx.state.session;
+						if (ctx.state.completed || !sess) return;
+						if (sess.currentAgent.id !== `node:${node.id}`) return; // already moved on
+						reportEvent(dispatch.callId, "flow.conversation_timeout", {
+							node: node.id,
+							seconds: conversation!.maxDurationSeconds,
+						});
+						sess.generateReply({
+							instructions: `The time for this part of the call is up. Warmly bring the conversation to a close now in ONE brief sentence, then ${closeAction}.`,
+						});
+					}, conversation!.maxDurationSeconds * 1000);
+				}
 				// Entry node speech is the greeting (step 8); later nodes open
 				// themselves. Not awaited — awaiting playout inside a
 				// tool-triggered onEnter deadlocks the tool call.
