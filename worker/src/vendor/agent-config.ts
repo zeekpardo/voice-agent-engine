@@ -158,6 +158,13 @@ export const AgentConfig = z.object({
 	 */
 	guardrails: z.string().nullish(),
 
+	/**
+	 * Raw goal text authored in the SaaS builder (the job's overarching
+	 * objective). Compiled into `instructions` (## GOAL) at save time; kept
+	 * separately so re-editing never round-trips the composed prompt.
+	 */
+	goal: z.string().nullish(),
+
 	// Multi-node flow (canvas-built agents). When present, the call runs as a
 	// graph of small agents: each node has its own instructions and gated
 	// tools, and moves to another node (or ends the call) through its exits.
