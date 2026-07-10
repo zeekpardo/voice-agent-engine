@@ -1,4 +1,5 @@
 import { llm, voice } from "@livekit/agents";
+import { z } from "zod";
 import {
 	type ContactStateEntryT,
 	type DispatchMetadata,
@@ -45,6 +46,13 @@ interface ObjectiveProgress {
 	attempts: number;
 	/** maxAttempts exhausted — stops gating the exit, stays unmet. */
 	skipped: boolean;
+	/** Fire-and-forget field write failed (audit Tier 1 #7). The objective still
+	 * counts as met — the model is never told the save failed — but the write is
+	 * retried once at node transition so a transient CRM blip doesn't silently
+	 * drop the captured value. */
+	writeFailed?: boolean;
+	/** The transition-time retry has already fired — guards a single retry. */
+	writeRetried?: boolean;
 }
 
 interface ObjectiveRuntime {
@@ -132,6 +140,26 @@ const objectiveThreshold = (o: FlowObjective): number =>
 const OBJECTIVE_JUDGE_SYSTEM =
 	'You evaluate whether data-collection objectives for a phone call have been satisfied by the conversation so far. Respond with ONLY a JSON object — no prose, no code fences — of the form {"checks":[{"key":"<objective key>","rating":<0-100>,"answer":"<extracted value or empty string>"}]}. Objectives come in two groups. For each objective under "To collect" include exactly one check. For each objective under "Already answered" include a check ONLY if the caller has since stated a DIFFERENT value than its recorded answer — return the new value with your confidence; do not re-report an unchanged answer. rating is your confidence that the CALLER explicitly provided the information (100 = clearly provided, 0 = not provided at all). Extract answer from what the caller actually said. NEVER invent or assume a value the caller did not state; if the information was not provided, rating must be low and answer empty. When an objective lists allowed values, answer must be exactly one of them, chosen from what the caller said. Some objectives are CONDITIONAL ("if X, …"): when the conversation clearly shows the condition does NOT apply, the objective is satisfied — rate it 100 with answer "N/A".';
 
+/**
+ * Structured-output contract for the judge (audit Tier 1 #6). The judge must
+ * return {"checks":[{"key,rating,answer"}]}; a hand-rolled JSON.parse used to
+ * swallow malformed replies (console.error + silent early return), stalling
+ * objective progression. Validated here so a bad reply is retried once and, on a
+ * second failure, surfaced as a `flow.judge_error` event instead of vanishing.
+ * Lenient on the leaf fields to preserve prior behavior: rating coerces to a
+ * number (was `Number(check.rating ?? 0)`), answer defaults to "" (was the
+ * `typeof === "string"` guard). Only the {checks:[{key}]} SHAPE is enforced. */
+const judgeCheckSchema = z.object({
+	key: z.string(),
+	rating: z.coerce.number().catch(0),
+	answer: z.string().catch(""),
+});
+const judgeOutputSchema = z.object({
+	checks: z.array(judgeCheckSchema),
+});
+type JudgeOutput = z.infer<typeof judgeOutputSchema>;
+const JUDGE_CORRECTIVE = "Your last reply was not valid JSON matching the schema; respond with ONLY the JSON.";
+
 /** Case- and whitespace-insensitive key for comparing a caller's corrected
  * answer against the recorded one (the material-change / duplicate-write guard). */
 const answerKey = (s: string): string => s.trim().replace(/\s+/g, " ").toLowerCase();
@@ -171,7 +199,7 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 
 	let activeObjectives: ObjectiveRuntime | null = null;
 
-	const writeObjectiveField = (objective: FlowObjective, answer: string): void => {
+	const writeObjectiveField = (objective: FlowObjective, answer: string, progress?: ObjectiveProgress): void => {
 		if (!objective.field || !answer) return;
 		if (!fieldWriteDef) {
 			console.warn(
@@ -191,7 +219,19 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 		void invokeTool(fieldWriteDef, dispatch, {
 			field_name: objective.field,
 			value: written,
-		}).catch((err) => console.error(`flow: objective field write failed (${objective.field})`, err));
+		}).catch((err) => {
+			console.error(`flow: objective field write failed (${objective.field})`, err);
+			// Failure honesty (audit Tier 1 #7): surface the dropped write and mark the
+			// objective so maybeCompleteObjectives retries it once before transitioning.
+			// The model is NOT interrupted and is never told the save succeeded.
+			if (progress) progress.writeFailed = true;
+			reportEvent(dispatch.callId, "flow.objective_write_failed", {
+				node: activeObjectives?.nodeId ?? null,
+				key: objective.key,
+				field: objective.field,
+				retry: progress?.writeRetried === true,
+			});
+		});
 	};
 
 	/**
@@ -224,7 +264,7 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 				source: "aggregate",
 			});
 			if (answer && answer.toUpperCase() !== "N/A") {
-				writeObjectiveField(agg, answer);
+				writeObjectiveField(agg, answer, progress);
 			}
 			console.log(`flow: aggregate objective "${agg.key}" completed -> "${answer}"`);
 		}
@@ -258,7 +298,7 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 				answer: answer.slice(0, 200),
 				source: "correction",
 			});
-			if (answer && answer.toUpperCase() !== "N/A") writeObjectiveField(agg, answer);
+			if (answer && answer.toUpperCase() !== "N/A") writeObjectiveField(agg, answer, progress);
 			console.log(`flow: aggregate objective "${agg.key}" recomposed after correction -> "${answer}"`);
 		}
 	};
@@ -314,23 +354,47 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 		});
 
 		const judgeLlm = rt.judge ? buildLlm({ temperature: 0, maxTokens: 400, ...rt.judge }) : defaultJudgeLlm;
-		const res = await judgeLlm.chat({ chatCtx: evalCtx }).collect();
-		// Per-class metering (Phase 4): the judge is a standalone call the session's
-		// MetricsCollected never sees — read usage straight off the collected response.
-		recordUsage(res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
-		const text = res.text
-			.trim()
-			.replace(/^```(?:json)?\s*/i, "")
-			.replace(/\s*```$/, "");
-		let parsed: { checks?: { key?: string; rating?: number; answer?: string }[] };
-		try {
-			parsed = JSON.parse(text) as typeof parsed;
-		} catch {
-			console.error(`flow: objective judge returned unparseable output: ${text.slice(0, 200)}`);
+		// Parse + schema-validate with one corrective retry (audit Tier 1 #6). Both
+		// attempts stay OFF the speech path (this whole pass is async/background). The
+		// retry appends a corrective nudge to the SAME context so the first attempt's
+		// prompt is unchanged.
+		let parsed: JudgeOutput | null = null;
+		for (let attempt = 0; attempt < 2; attempt++) {
+			if (attempt > 0) evalCtx.addMessage({ role: "user", content: JUDGE_CORRECTIVE });
+			const res = await judgeLlm.chat({ chatCtx: evalCtx }).collect();
+			// Per-class metering (Phase 4): the judge is a standalone call the session's
+			// MetricsCollected never sees — read usage straight off the collected response.
+			recordUsage(res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
+			const text = res.text
+				.trim()
+				.replace(/^```(?:json)?\s*/i, "")
+				.replace(/\s*```$/, "");
+			let json: unknown;
+			try {
+				json = JSON.parse(text);
+			} catch {
+				console.error(`flow: objective judge returned unparseable output (attempt ${attempt + 1}): ${text.slice(0, 200)}`);
+				continue;
+			}
+			const validated = judgeOutputSchema.safeParse(json);
+			if (validated.success) {
+				parsed = validated.data;
+				break;
+			}
+			console.error(
+				`flow: objective judge returned schema-invalid output (attempt ${attempt + 1}): ${text.slice(0, 200)}`,
+			);
+		}
+		if (!parsed) {
+			// Never silent: surface the stall so objective progression failures are visible.
+			reportEvent(dispatch.callId, "flow.judge_error", {
+				node: rt.nodeId,
+				reason: "unparseable_or_schema_invalid_json",
+			});
 			return;
 		}
 
-		for (const check of parsed.checks ?? []) {
+		for (const check of parsed.checks) {
 			const objective = rt.objectives.find((o) => o.key === check.key);
 			if (!objective) continue;
 			const progress = rt.state.get(objective.key);
@@ -367,7 +431,7 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 					answer: corrected.slice(0, 200),
 					source: "correction",
 				});
-				if (corrected.toUpperCase() !== "N/A") writeObjectiveField(objective, corrected);
+				if (corrected.toUpperCase() !== "N/A") writeObjectiveField(objective, corrected, progress);
 				// Ripple the correction into any already-completed aggregate.
 				recomposeAggregates(rt, objective.key);
 				continue;
@@ -388,7 +452,7 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			// "N/A" = a conditional objective whose condition didn't apply —
 			// satisfied, but nothing to write to the CRM.
 			if (progress.answer && progress.answer.toUpperCase() !== "N/A") {
-				writeObjectiveField(objective, progress.answer);
+				writeObjectiveField(objective, progress.answer, progress);
 			}
 		}
 
@@ -426,6 +490,17 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			return (o.required ?? true) && p && !p.met && !p.skipped;
 		});
 		if (pending.length > 0) return;
+		// Retry once any field write that failed while this node was active (audit
+		// Tier 1 #7). Fire-and-forget like the original write — the transition never
+		// blocks on the CRM — but a transient blip no longer silently drops a
+		// captured value. writeRetried guards against a second retry.
+		for (const o of rt.objectives) {
+			const p = rt.state.get(o.key);
+			if (!p || !p.writeFailed || p.writeRetried || !p.answer) continue;
+			p.writeRetried = true;
+			reportEvent(dispatch.callId, "flow.objective_write_retry", { node: rt.nodeId, key: o.key, field: o.field ?? null });
+			writeObjectiveField(o, p.answer, p);
+		}
 		rt.transitioning = true;
 		reportEvent(dispatch.callId, "flow.objectives_met", { node: rt.nodeId });
 		void (async () => {

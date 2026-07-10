@@ -1,4 +1,5 @@
 import { llm } from "@livekit/agents";
+import { z } from "zod";
 import { reportEvent } from "../gateway.js";
 import { invokeTool } from "../tools.js";
 import { type FlowRuntimeContext, tagRulesSatisfied, upsertContactState } from "./context.js";
@@ -204,26 +205,62 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 					.join("\n")}\n\nConversation transcript:\n${transcript}`,
 			});
 
+			// Resolve a raw LLM reply to a listed exit — the same lenient match the
+			// router has always used (exact name, then substring), extracted so both
+			// the zod refinement and the final pick share one definition.
+			const matchExit = (text: string) => {
+				const lower = text.trim().toLowerCase();
+				return (
+					routableExits.find((e) => e.name.toLowerCase() === lower) ??
+					routableExits.find((e) => lower.includes(e.name.toLowerCase()))
+				);
+			};
+			// Structured-output validation (audit Tier 1 #6): validate that the
+			// decision names one of the listed options. Previously an unlisted reply
+			// silently fell to the fallback exit with no trace. Now: one corrective
+			// retry, then the deterministic fallback (existing behavior) — but the
+			// unlisted attempts are logged so mis-routes are visible.
+			const decisionSchema = z
+				.string()
+				.transform((s) => s.trim())
+				.refine((s) => s.length > 0 && matchExit(s) !== undefined, "decision does not name a listed option");
 			let chosen = fallbackExit;
 			let decision = "";
-			try {
-				// Router tier (Phase 4): a DEDICATED instance (never the shared
-				// defaultLlm) so this standalone evaluation's tokens are metered as
-				// "router" and never double-counted by the session's responder
-				// MetricsCollected. node.llm override wins; else config.models.router,
-				// else config.llm.model (today's behavior).
-				const evalLlm = node.llm ? ctx.buildLlm(node.llm) : ctx.buildLlm({ model: ctx.models.router });
-				const res = await evalLlm.chat({ chatCtx: evalCtx }).collect();
-				ctx.recordUsage("router", res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
-				decision = res.text.trim();
-				const lower = decision.toLowerCase();
-				chosen =
-					routableExits.find((e) => e.name.toLowerCase() === lower) ??
-					routableExits.find((e) => lower.includes(e.name.toLowerCase())) ??
-					fallbackExit;
-			} catch (err) {
-				console.error(`flow: router node "${node.id}" evaluation failed, using fallback exit`, err);
-				decision = "evaluation_error";
+			// Router tier (Phase 4): a DEDICATED instance (never the shared defaultLlm)
+			// so this standalone evaluation's tokens are metered as "router" and never
+			// double-counted by the session's responder MetricsCollected. node.llm
+			// override wins; else config.models.router, else config.llm.model.
+			const evalLlm = node.llm ? ctx.buildLlm(node.llm) : ctx.buildLlm({ model: ctx.models.router });
+			for (let attempt = 0; attempt < 2; attempt++) {
+				// Corrective retry stays OFF the speech path (router eval is a standalone
+				// background pass). The nudge matches the router's option-name contract —
+				// this node expects a bare option name, not JSON.
+				if (attempt > 0) {
+					evalCtx.addMessage({
+						role: "user",
+						content:
+							"Your last reply did not name one of the listed options. Reply with EXACTLY one option name from the list — the option name only, nothing else.",
+					});
+				}
+				try {
+					const res = await evalLlm.chat({ chatCtx: evalCtx }).collect();
+					ctx.recordUsage("router", res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
+					decision = res.text.trim();
+					const validated = decisionSchema.safeParse(decision);
+					if (validated.success) {
+						chosen = matchExit(validated.data)!;
+						break;
+					}
+					console.error(
+						`flow: router node "${node.id}" returned an unlisted option (attempt ${attempt + 1}): ${decision.slice(0, 120)}`,
+					);
+				} catch (err) {
+					// A thrown LLM/transport error won't fix on retry — fall straight to
+					// the deterministic fallback exit (unchanged behavior).
+					console.error(`flow: router node "${node.id}" evaluation failed, using fallback exit`, err);
+					decision = "evaluation_error";
+					break;
+				}
 			}
 			reportEvent(dispatch.callId, "flow.exit", {
 				node: node.id,

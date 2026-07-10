@@ -58,6 +58,21 @@ export async function invokeTool(
 	}
 }
 
+/**
+ * Slow-tool spoken filler (audit Tier 1 #2b). A CRM webhook that runs seconds
+ * (check_availability) is silent today; a caller hears dead air. The installed
+ * @livekit/agents 1.5.0 RunContext exposes `filler(source, options, fn)`
+ * natively: it speaks `source` via session.say ONLY after the session has been
+ * continuously idle for `delay` ms while `fn` runs, then returns fn's result
+ * (see node_modules/@livekit/agents/dist/voice/run_context.d.ts). Fast tools
+ * resolve before the dwell elapses, so the filler never fires for them — no
+ * extra latency on instant tools. (RunContext also has `update()` for
+ * non-blocking progress, but that changes the blocking/result semantics we rely
+ * on for silent field writes, so filler is the correct primitive here.)
+ */
+const FILLER_DELAY_MS = 800;
+const FILLER_TEXT = "One moment while I check that.";
+
 export function buildTools(
 	tools: ToolDef[],
 	dispatch: DispatchMetadata,
@@ -68,32 +83,44 @@ export function buildTools(
 		out[t.name] = llm.tool({
 			description: t.description,
 			parameters: t.json_schema as JSONSchema7,
-			execute: async (args: unknown) => {
-				try {
-					const result = await invokeTool(t, dispatch, args);
-					// Fire-and-forget writes: a {silent: true} result becomes NO tool
-					// output, so the SDK skips the post-tool continuation generation
-					// (replyRequired = output !== undefined). Without this, every
-					// mid-speech CRM write triggered a second generation that
-					// re-spoke the agent's question.
-					if (
-						result !== null &&
-						typeof result === "object" &&
-						!Array.isArray(result) &&
-						(result as { silent?: boolean }).silent === true
-					) {
-						return undefined;
+			execute: async (args: unknown, opts?: llm.ToolOptions) => {
+				const run = async (): Promise<JSONValue | undefined> => {
+					try {
+						const result = await invokeTool(t, dispatch, args);
+						// Fire-and-forget writes: a {silent: true} result becomes NO tool
+						// output, so the SDK skips the post-tool continuation generation
+						// (replyRequired = output !== undefined). Without this, every
+						// mid-speech CRM write triggered a second generation that
+						// re-spoke the agent's question.
+						if (
+							result !== null &&
+							typeof result === "object" &&
+							!Array.isArray(result) &&
+							(result as { silent?: boolean }).silent === true
+						) {
+							return undefined;
+						}
+						return result;
+					} catch {
+						// Tell the LLM the tool failed so the agent can recover verbally
+						// ("let me have someone follow up on that") — spec §8.
+						return {
+							error: "tool_failed",
+							message:
+								"The tool could not be reached. Apologize briefly and offer to follow up. Do NOT repeat your last question.",
+						};
 					}
-					return result;
-				} catch {
-					// Tell the LLM the tool failed so the agent can recover verbally
-					// ("let me have someone follow up on that") — spec §8.
-					return {
-						error: "tool_failed",
-						message:
-							"The tool could not be reached. Apologize briefly and offer to follow up. Do NOT repeat your last question.",
-					};
+				};
+
+				// Only wrap tools that can plausibly outrun the filler dwell: a tool
+				// whose own timeout is <= the dwell either returns or aborts before the
+				// filler would ever speak, so skipping the scheduler for those respects
+				// each tool's timeout config and keeps instant tools truly silent.
+				const ctx = opts?.ctx;
+				if (ctx && t.timeout_ms > FILLER_DELAY_MS) {
+					return ctx.filler(FILLER_TEXT, { delay: FILLER_DELAY_MS }, run);
 				}
+				return run();
 			},
 		});
 	}
