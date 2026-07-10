@@ -9,8 +9,9 @@ import { type AgentConfig, type DispatchMetadata, reportCompletion, reportEvent 
  *  - agent-initiated hangups FLUSH the transcript BEFORE room teardown (the
  *    job process dies within ms of room deletion — transcripts were lost this
  *    way);
- *  - never double-close (racing the SDK's disconnect-close crashed
- *    closeImplInner) — a delayed session.close() is only a safety net;
+ *  - never double-close (concurrent closes race inside closeImplInner) — we
+ *    close the session ourselves, awaited and exactly once, BEFORE deleting
+ *    the room so the SDK's own closes early-return;
  *  - silence / max-duration hangups disconnect the phone leg via deleteRoom;
  *  - completion is reported exactly once, whatever ends the call.
  */
@@ -187,17 +188,20 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	//    deletion, killing any in-flight request (transcripts were lost this
 	//    way). The gateway's /complete responds fast (summarize runs async
 	//    server-side), so this adds ~50ms before the line drops.
-	// 2. Delete the room — disconnects the SIP leg; the SDK closes the
-	//    session itself on the disconnect. Do NOT call session.close() here:
-	//    racing the SDK's disconnect-close crashes closeImplInner
-	//    ("reading 'currentSpeech'"). A delayed close is the safety net.
+	// 2. Close the session OURSELVES — awaited, exactly once — BEFORE deleting
+	//    the room. deleteRoom() otherwise triggers two SDK closes at once (the
+	//    ROOM_DELETED disconnect-close and job_proc_lazy_main's shutdown close);
+	//    both pass closeImplInner's `if (!started) return` guard (started only
+	//    flips false at the very end) and race — one sets activity=undefined
+	//    mid-drain, the other then reads activity.currentSpeech → TypeError →
+	//    unhandled rejection → the job wedges 60s until SIGTERM. Closing first
+	//    (awaited) drives started→false, so both SDK closes early-return.
+	// 3. Delete the room — disconnects the SIP leg; the session is already down.
 	state.hangUp = async (reason: string) => {
 		if (endReason === "unknown") endReason = reason;
 		await complete().catch((err) => console.error("pre-hangup flush failed", err));
+		await session.close().catch((err) => console.error("session close failed", err));
 		await ctx.deleteRoom().catch(() => {});
-		setTimeout(() => {
-			void session.close().catch(() => {});
-		}, 5000);
 	};
 
 	session.on(voice.AgentSessionEventTypes.Close, (ev) => {
