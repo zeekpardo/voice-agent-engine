@@ -130,7 +130,11 @@ const OBJECTIVE_RATING_THRESHOLD = 90;
 const objectiveThreshold = (o: FlowObjective): number =>
 	Math.min(100, Math.max(10, o.sensitivity ?? OBJECTIVE_RATING_THRESHOLD));
 const OBJECTIVE_JUDGE_SYSTEM =
-	'You evaluate whether data-collection objectives for a phone call have been satisfied by the conversation so far. Respond with ONLY a JSON object — no prose, no code fences — of the form {"checks":[{"key":"<objective key>","rating":<0-100>,"answer":"<extracted value or empty string>"}]}. Include one check per objective. rating is your confidence that the CALLER explicitly provided the information (100 = clearly provided, 0 = not provided at all). Extract answer from what the caller actually said. NEVER invent or assume a value the caller did not state; if the information was not provided, rating must be low and answer empty. When an objective lists allowed values, answer must be exactly one of them, chosen from what the caller said. Some objectives are CONDITIONAL ("if X, …"): when the conversation clearly shows the condition does NOT apply, the objective is satisfied — rate it 100 with answer "N/A".';
+	'You evaluate whether data-collection objectives for a phone call have been satisfied by the conversation so far. Respond with ONLY a JSON object — no prose, no code fences — of the form {"checks":[{"key":"<objective key>","rating":<0-100>,"answer":"<extracted value or empty string>"}]}. Objectives come in two groups. For each objective under "To collect" include exactly one check. For each objective under "Already answered" include a check ONLY if the caller has since stated a DIFFERENT value than its recorded answer — return the new value with your confidence; do not re-report an unchanged answer. rating is your confidence that the CALLER explicitly provided the information (100 = clearly provided, 0 = not provided at all). Extract answer from what the caller actually said. NEVER invent or assume a value the caller did not state; if the information was not provided, rating must be low and answer empty. When an objective lists allowed values, answer must be exactly one of them, chosen from what the caller said. Some objectives are CONDITIONAL ("if X, …"): when the conversation clearly shows the condition does NOT apply, the objective is satisfied — rate it 100 with answer "N/A".';
+
+/** Case- and whitespace-insensitive key for comparing a caller's corrected
+ * answer against the recorded one (the material-change / duplicate-write guard). */
+const answerKey = (s: string): string => s.trim().replace(/\s+/g, " ").toLowerCase();
 
 /**
  * Idle = agent finished speaking its current reply. Bounded: a stuck state
@@ -226,33 +230,87 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 		}
 	};
 
+	/**
+	 * Correction ripple (LiveKit workflow alignment #1): when a corrected part
+	 * belongs to an ALREADY-COMPLETED aggregate, recompose the aggregate's answer
+	 * from its parts (aggregateOf order, space-joined) and re-fire its field write
+	 * with source "correction". An unmet aggregate is left alone — completeAggregates
+	 * finishes it normally once every part is met. The aggregate STAYS met; this
+	 * never un-completes it or re-arms a transition.
+	 */
+	const recomposeAggregates = (rt: ObjectiveRuntime, changedKey: string): void => {
+		for (const agg of rt.objectives) {
+			if (!agg.aggregateOf?.length || !agg.aggregateOf.includes(changedKey)) continue;
+			const progress = rt.state.get(agg.key);
+			if (!progress || !progress.met) continue;
+			const answer = agg.aggregateOf
+				.map((k) => (rt.state.get(k)?.answer ?? "").trim())
+				.filter((a) => a && a.toUpperCase() !== "N/A")
+				.join(" ");
+			// No material change → never re-fire the aggregate write.
+			if (answerKey(answer) === answerKey(progress.answer ?? "")) continue;
+			progress.answer = answer;
+			progress.rating = 100;
+			reportEvent(dispatch.callId, "flow.objective", {
+				node: rt.nodeId,
+				key: agg.key,
+				rating: 100,
+				answer: answer.slice(0, 200),
+				source: "correction",
+			});
+			if (answer && answer.toUpperCase() !== "N/A") writeObjectiveField(agg, answer);
+			console.log(`flow: aggregate objective "${agg.key}" recomposed after correction -> "${answer}"`);
+		}
+	};
+
 	const runObjectiveJudge = async (rt: ObjectiveRuntime): Promise<void> => {
 		// Aggregate objectives have no own judge question — they complete from their
-		// parts (completeAggregates), so they are excluded from the unmet list.
+		// parts (completeAggregates), so they are excluded from both lists.
 		const unmet = rt.objectives.filter((o) => {
 			if (o.aggregateOf?.length) return false;
 			const p = rt.state.get(o.key);
 			return p && !p.met && !p.skipped;
 		});
-		if (unmet.length === 0) return;
+		// Corrections (LiveKit workflow alignment #1): already-MET objectives are
+		// shown to the judge too — with their recorded answer — so a caller who
+		// changes an answer later in the SAME node ("actually my zip is 93308") is
+		// not ignored. maxAttempts-skipped objectives are NOT correctable (they were
+		// never answered — skipped stays unmet); a met objective completed by the
+		// judge, by skipIfKnown ("known"), or as an aggregate part all correct here.
+		const correctable = rt.objectives.filter((o) => {
+			if (o.aggregateOf?.length) return false; // aggregates recompose from their parts
+			const p = rt.state.get(o.key);
+			return p?.met === true;
+		});
+		if (unmet.length === 0 && correctable.length === 0) return;
 		const transcript = turns
 			.filter((t) => t.role !== "system")
 			.slice(-40)
 			.map((t) => `${t.role === "user" ? "caller" : "agent"}: ${t.text}`)
 			.join("\n");
 
+		const objLine = (o: FlowObjective): string =>
+			`- key "${o.key}": ${o.description}${
+				o.options ? ` — allowed values: ${o.options.map((v) => `"${v}"`).join(", ")}` : ""
+			}`;
+		// Two clearly-labeled sections; the "Already answered" block is only present
+		// when there are met objectives to correct, so the starved judge context
+		// pays nothing extra on a node with no captured answers yet.
+		const sections: string[] = [];
+		if (unmet.length > 0) sections.push(`To collect:\n${unmet.map(objLine).join("\n")}`);
+		if (correctable.length > 0) {
+			sections.push(
+				`Already answered:\n${correctable
+					.map((o) => `${objLine(o)} — recorded answer: "${rt.state.get(o.key)?.answer ?? ""}"`)
+					.join("\n")}`,
+			);
+		}
+
 		const evalCtx = new llm.ChatContext();
 		evalCtx.addMessage({ role: "system", content: OBJECTIVE_JUDGE_SYSTEM });
 		evalCtx.addMessage({
 			role: "user",
-			content: `Objectives:\n${unmet
-				.map(
-					(o) =>
-						`- key "${o.key}": ${o.description}${
-							o.options ? ` — allowed values: ${o.options.map((v) => `"${v}"`).join(", ")}` : ""
-						}`,
-				)
-				.join("\n")}\n\nConversation transcript:\n${transcript}`,
+			content: `${sections.join("\n\n")}\n\nConversation transcript:\n${transcript}`,
 		});
 
 		const judgeLlm = rt.judge ? buildLlm({ temperature: 0, maxTokens: 400, ...rt.judge }) : defaultJudgeLlm;
@@ -276,12 +334,50 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			const objective = rt.objectives.find((o) => o.key === check.key);
 			if (!objective) continue;
 			const progress = rt.state.get(objective.key);
-			if (!progress || progress.met) continue;
+			if (!progress) continue;
 			const rating = Number(check.rating ?? 0);
+			const answer = typeof check.answer === "string" ? check.answer.trim() : "";
+
+			if (progress.met) {
+				// --- Correction of an already-met objective ---
+				// Aggregates never correct here (no judge question; they recompose
+				// from parts) — skip defensively even if the judge echoes one back.
+				if (objective.aggregateOf?.length) continue;
+				// A confident, non-empty extraction is required to overwrite a
+				// captured answer.
+				if (!(rating >= objectiveThreshold(objective)) || !answer) continue;
+				// Picklist objectives must still resolve to an exact option; an answer
+				// matching none is not a valid correction.
+				if (objective.options && !objective.options.some((v) => v.toLowerCase() === answer.toLowerCase())) {
+					continue;
+				}
+				const option = objective.options?.find((v) => v.toLowerCase() === answer.toLowerCase());
+				const corrected = option ?? answer;
+				// No material change (case/whitespace-insensitive) → never re-fire the
+				// write (duplicate-write guard).
+				if (answerKey(corrected) === answerKey(progress.answer ?? "")) continue;
+				progress.answer = corrected;
+				progress.rating = rating;
+				// The objective STAYS met: a correction never un-completes the node or
+				// re-arms its transition — node progression / exit gating is unaffected.
+				reportEvent(dispatch.callId, "flow.objective", {
+					node: rt.nodeId,
+					key: objective.key,
+					rating,
+					answer: corrected.slice(0, 200),
+					source: "correction",
+				});
+				if (corrected.toUpperCase() !== "N/A") writeObjectiveField(objective, corrected);
+				// Ripple the correction into any already-completed aggregate.
+				recomposeAggregates(rt, objective.key);
+				continue;
+			}
+
+			// --- First-time completion ---
 			if (!(rating >= objectiveThreshold(objective))) continue;
 			progress.met = true;
 			progress.rating = rating;
-			progress.answer = typeof check.answer === "string" ? check.answer.trim() : "";
+			progress.answer = answer;
 			reportEvent(dispatch.callId, "flow.objective", {
 				node: rt.nodeId,
 				key: objective.key,
@@ -409,6 +505,12 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			maybeCompleteObjectives(rt);
 		},
 		onUserTurn(): void {
+			// Corrections are only possible while this node is still the ACTIVE
+			// objectives node. Once maybeCompleteObjectives transitions (or a
+			// scenario/secondary exit fires), `activeObjectives` is cleared and the
+			// tracker disarms — a caller who corrects an answer AFTER the node has
+			// handed off is no longer tracked here (documented limitation; matches
+			// the pre-existing re-entry-restarts-goals behavior).
 			const rt = activeObjectives;
 			if (!rt || rt.transitioning) return;
 			if (rt.judging) {
