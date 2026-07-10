@@ -36,6 +36,10 @@ export interface DispatchMetadata {
 	/** Per-call CRM tag names (Phase 5b). Optional: old dispatches omit it. Seeds
 	 * the worker's in-memory tag set for tag-driven exit gating. Opaque strings. */
 	contactTags?: string[];
+	/** Session channel (Phase 6). Optional: old dispatches omit it → voice. Selects
+	 * the worker's I/O adapter — "voice" (STT/TTS/VAD over audio) or "text" (lk.chat
+	 * text streams, no audio). The flow runtime is identical across both. */
+	channel?: "voice" | "text";
 }
 
 /**

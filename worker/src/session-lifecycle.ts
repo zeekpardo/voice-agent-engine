@@ -14,7 +14,29 @@ import { type AgentConfig, type DispatchMetadata, reportCompletion, reportEvent 
  *    the room so the SDK's own closes early-return;
  *  - silence / max-duration hangups disconnect the phone leg via deleteRoom;
  *  - completion is reported exactly once, whatever ends the call.
+ *
+ * Channel abstraction (Phase 6): everything I/O-specific — how the AgentSession
+ * is constructed (STT/TTS/VAD vs bare), how it goes live (SIP answer wait vs a
+ * simple participant wait), how the caller's turns arrive (audio vs lk.chat text
+ * streams) and how the agent's replies leave (TTS audio vs lk.chat text) — lives
+ * behind the `ChannelRuntime` seam built by `buildChannel`. The `voice` channel
+ * is today's behavior byte-for-byte; the `text` channel runs the SAME flow (same
+ * `turns` buffer, objectives/memory hooks, transcript flush, completion report,
+ * timers) over LiveKit text streams with no audio tracks. Everything below the
+ * seam — the shared event wiring, the completion/hangup ordering, the engine
+ * timers — is channel-agnostic.
  */
+
+/** LiveKit text-stream topic for chat I/O (matches the SDK's RoomIO default and
+ * the wire contract the SaaS/text portal is built against). Caller turns arrive
+ * on this topic (native RoomIO handler → generateReply) and the agent's replies
+ * are published back on it. Mirrors `@livekit/agents` constants TOPIC_CHAT. */
+const TOPIC_CHAT = "lk.chat";
+
+/** Text sessions have no dead-air cost, so the inactivity timeout is far longer
+ * than a voice call's silence-hangup. Used unless the configured silence value
+ * is even longer (an operator who set a long voice silence keeps it on text). */
+const TEXT_INACTIVITY_SECONDS = 300;
 
 interface RemoteLike {
 	identity: string;
@@ -63,36 +85,36 @@ function waitForSipAnswer(
 	});
 }
 
-export interface SessionLifecycleDeps {
-	job: JobContext;
-	config: AgentConfig;
-	dispatch: DispatchMetadata;
-	/** Live transcript buffer (shared with the flow modules + objectives). */
-	turns: Turn[];
-	/** Shared mutable holder: this fills in `session`, `hangUp`, `completed`. */
-	state: FlowRuntimeState;
-	agent: voice.Agent;
-	greeting?: string;
-	/** Inbound SIP jobs skip the call.started event (already reported upstream). */
-	isInbound: boolean;
-	/** Fired after each recorded caller turn (flow objective judging); absent
-	 * on the single-agent path. */
-	objectiveUserTurnHook?: () => void;
-	/** Fired after each recorded caller turn (rolling-summary refresh); absent
-	 * on the single-agent path or when memory is disabled. */
-	memoryUserTurnHook?: () => void;
+/**
+ * The channel-specific I/O surface (Phase 6). One is built per job by
+ * `buildChannel`; the shared lifecycle in `startSession` drives it. Keeps the
+ * voice path byte-for-byte identical while letting a text session reuse every
+ * flow module, timer, and the completion pipeline unchanged.
+ */
+interface ChannelRuntime {
+	/** The AgentSession — voice: STT/TTS/VAD + turn detection; text: bare (the
+	 * agent carries the LLM, text I/O rides RoomIO's lk.chat streams). */
+	session: voice.AgentSession;
+	/** Inactivity-hangup budget in seconds: voice = silence-hangup; text = a far
+	 * longer no-dead-air-cost inactivity window. */
+	idleTimeoutSeconds: number;
+	/** Start the AgentSession with channel-appropriate room I/O options. */
+	start(agent: voice.Agent): Promise<void>;
+	/** Wait until the human is live (voice: participant + SIP answer; text:
+	 * participant joined). False → no answer / abandoned before going live. */
+	waitUntilLive(): Promise<boolean>;
+	/** Egress a committed agent turn. voice: no-op (TTS already spoke it); text:
+	 * publish the full message on the lk.chat topic. Called from the shared
+	 * ConversationItemAdded listener so the greeting and every reply flow out. */
+	emitAgentTurn(text: string): void;
 }
 
-const DEFAULT_DISCLOSURE = "Just so you know, you're speaking with an A.I. assistant.";
-
 /**
- * Build the AgentSession, wire every session event handler + engine timer, go
- * live (waiting for the human / SIP answer), then speak the disclosure +
- * greeting. Returns once the opening speech is queued.
+ * Build the voice channel: today's AgentSession (STT/TTS/VAD + turn detection),
+ * its go-live SIP-answer wait, and TTS-drives-egress (so emitAgentTurn is a
+ * no-op). Preserved byte-for-byte from the pre-Phase-6 startSession.
  */
-export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
-	const { job: ctx, config, dispatch, turns, state, agent, greeting } = deps;
-
+function buildVoiceChannel(ctx: JobContext, config: AgentConfig): ChannelRuntime {
 	const sttModel = inferenceModel(config.stt.model, config.stt.provider, "xai/stt-1");
 	const session = new voice.AgentSession({
 		// xAI STT auto-detects (and code-switches) languages mid-call; pinning
@@ -120,6 +142,121 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 			preemptiveGeneration: { enabled: config.turnDetection.preemptiveGeneration !== false },
 		},
 	});
+
+	const noAnswerMs = (config.timeouts.noAnswerSeconds ?? 25) * 1000;
+	return {
+		session,
+		idleTimeoutSeconds: config.timeouts.silenceHangupSeconds,
+		start: (agent) => session.start({ agent, room: ctx.room }).then(() => undefined),
+		waitUntilLive: async () => {
+			// Wait for the human before greeting: browsers join within seconds;
+			// outbound SIP participants exist while ringing, so also wait for the
+			// call to be answered (sip.callStatus → active).
+			const remote = await Promise.race([
+				ctx.waitForParticipant(),
+				new Promise<null>((r) => setTimeout(() => r(null), noAnswerMs + 20_000)),
+			]);
+			return remote ? await waitForSipAnswer(ctx, remote, noAnswerMs) : false;
+		},
+		// Voice replies are spoken by TTS — nothing extra to emit.
+		emitAgentTurn: () => {},
+	};
+}
+
+/**
+ * Build the text channel (Phase 6): a bare AgentSession with no STT/TTS/VAD,
+ * driven entirely over LiveKit text streams on the lk.chat topic. Inbound caller
+ * turns are handled natively by RoomIO's text-stream handler (which calls
+ * generateReply on the agent's LLM); outbound agent turns are published back on
+ * lk.chat by emitAgentTurn. No audio tracks are ever published or subscribed.
+ */
+function buildTextChannel(ctx: JobContext, config: AgentConfig): ChannelRuntime {
+	// No stt/tts/vad: the agent carries the LLM, and turns are text — no
+	// endpointing / VAD / barge-in machinery is involved.
+	const session = new voice.AgentSession({});
+
+	const publish = (text: string) => {
+		const lp = ctx.room.localParticipant;
+		if (!lp) return;
+		// Full-message delivery (sendText, not streamText): a text/SMS channel
+		// wants the whole reply as one message, not per-token deltas.
+		void lp.sendText(text, { topic: TOPIC_CHAT }).catch((err) => {
+			console.error("text channel: sendText failed", err);
+		});
+	};
+
+	return {
+		session,
+		// Text has no dead-air cost — a much longer inactivity budget (unless the
+		// operator configured an even longer voice silence-hangup).
+		idleTimeoutSeconds: Math.max(config.timeouts.silenceHangupSeconds, TEXT_INACTIVITY_SECONDS),
+		start: (agent) =>
+			session
+				.start({
+					agent,
+					room: ctx.room,
+					// Text-only I/O: no audio in or out. Caller input arrives on the
+					// lk.chat text-stream topic (RoomIO registers the handler and the
+					// default callback feeds it to generateReply). We publish the
+					// agent's replies ourselves (emitAgentTurn on lk.chat), so the
+					// native transcription output is disabled to avoid a second stream
+					// on lk.transcription.
+					inputOptions: { audioEnabled: false, textEnabled: true },
+					outputOptions: { audioEnabled: false, transcriptionEnabled: false },
+				})
+				.then(() => undefined),
+		waitUntilLive: async () => {
+			// A text participant (browser / bridge) joins immediately; no SIP answer
+			// to wait on. Timeout → treated as abandoned (no_answer).
+			const noAnswerMs = (config.timeouts.noAnswerSeconds ?? 25) * 1000;
+			const remote = await Promise.race([
+				ctx.waitForParticipant(),
+				new Promise<null>((r) => setTimeout(() => r(null), noAnswerMs)),
+			]);
+			return !!remote;
+		},
+		emitAgentTurn: publish,
+	};
+}
+
+function buildChannel(channel: "voice" | "text", ctx: JobContext, config: AgentConfig): ChannelRuntime {
+	return channel === "text" ? buildTextChannel(ctx, config) : buildVoiceChannel(ctx, config);
+}
+
+export interface SessionLifecycleDeps {
+	job: JobContext;
+	config: AgentConfig;
+	dispatch: DispatchMetadata;
+	/** Live transcript buffer (shared with the flow modules + objectives). */
+	turns: Turn[];
+	/** Shared mutable holder: this fills in `session`, `hangUp`, `completed`. */
+	state: FlowRuntimeState;
+	agent: voice.Agent;
+	greeting?: string;
+	/** Inbound SIP jobs skip the call.started event (already reported upstream). */
+	isInbound: boolean;
+	/** Session channel (Phase 6): selects the I/O adapter. Defaults to voice. */
+	channel: "voice" | "text";
+	/** Fired after each recorded caller turn (flow objective judging); absent
+	 * on the single-agent path. */
+	objectiveUserTurnHook?: () => void;
+	/** Fired after each recorded caller turn (rolling-summary refresh); absent
+	 * on the single-agent path or when memory is disabled. */
+	memoryUserTurnHook?: () => void;
+}
+
+const DEFAULT_DISCLOSURE = "Just so you know, you're speaking with an A.I. assistant.";
+
+/**
+ * Build the AgentSession (per channel), wire every session event handler +
+ * engine timer, go live (waiting for the human / SIP answer), then speak/send
+ * the disclosure + greeting. Returns once the opening is queued.
+ */
+export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
+	const { job: ctx, config, dispatch, turns, state, agent, greeting } = deps;
+
+	const channel = buildChannel(deps.channel, ctx, config);
+	const { session } = channel;
 	// Publish the session so the flow modules' lazy ctx.session getter resolves.
 	state.session = session;
 
@@ -138,12 +275,18 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 		}
 	});
 
-	// 4. Collect transcript turns + usage meters as the session runs.
+	// 4. Collect transcript turns + usage meters as the session runs. Channel-
+	// agnostic: ConversationItemAdded fires whether the turn arrived by STT or a
+	// text stream, and whether the reply left as TTS audio or a text stream.
 	session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
 		if (!("role" in ev.item)) return; // agent-handoff items carry no speech
 		const role = ev.item.role === "assistant" ? "agent" : ev.item.role === "user" ? "user" : "system";
 		const text = ev.item.textContent;
 		if (text) turns.push({ role, text, ts: Date.now() / 1000 });
+		// Text channel: publish the agent's committed reply back on lk.chat (no-op
+		// on voice, where TTS already spoke it). The greeting/disclosure ride the
+		// same path (session.say emits a ConversationItemAdded too).
+		if (role === "agent" && text) channel.emitAgentTurn(text);
 		// Judge objectives off the hot path: fires AFTER the turn is recorded
 		// so the judge always sees the caller's latest words. Async — never
 		// delays the reply that's already generating.
@@ -240,18 +383,22 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	});
 	ctx.addShutdownCallback(complete);
 
-	// 6. Engine-enforced timeouts (spec §4).
+	// 6. Engine-enforced timeouts (spec §4). Max-duration applies to both
+	// channels; the silence timer becomes a (longer) inactivity timeout on text.
 	const maxCallTimer = setTimeout(() => {
 		void state.hangUp("max_duration");
 	}, config.timeouts.maxCallSeconds * 1000);
 
 	let silenceTimer: NodeJS.Timeout | undefined;
+	const idleMs = channel.idleTimeoutSeconds * 1000;
 	const resetSilence = () => {
 		if (silenceTimer) clearTimeout(silenceTimer);
 		silenceTimer = setTimeout(() => {
-			void state.hangUp("silence_timeout");
-		}, config.timeouts.silenceHangupSeconds * 1000);
+			void state.hangUp(deps.channel === "text" ? "inactivity_timeout" : "silence_timeout");
+		}, idleMs);
 	};
+	// UserInputTranscribed is STT-driven (voice only, dead on text); ConversationItemAdded
+	// fires on every committed turn on both channels, so text inactivity resets too.
 	session.on(voice.AgentSessionEventTypes.UserInputTranscribed, resetSilence);
 	session.on(voice.AgentSessionEventTypes.ConversationItemAdded, resetSilence);
 	session.on(voice.AgentSessionEventTypes.Close, () => {
@@ -262,17 +409,11 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 		if (state.conversationTimer) clearTimeout(state.conversationTimer);
 	});
 
-	// 7. Go live. Wait for the human before greeting: browsers join within
-	// seconds; outbound SIP participants exist while ringing, so also wait
-	// for the call to be answered (sip.callStatus → active).
-	await session.start({ agent, room: ctx.room });
+	// 7. Go live. The channel owns how (voice: start + SIP answer wait; text:
+	// start with text-only I/O + participant wait).
+	await channel.start(agent);
 
-	const noAnswerMs = (config.timeouts.noAnswerSeconds ?? 25) * 1000;
-	const remote = await Promise.race([
-		ctx.waitForParticipant(),
-		new Promise<null>((r) => setTimeout(() => r(null), noAnswerMs + 20_000)),
-	]);
-	const answered = remote ? await waitForSipAnswer(ctx, remote, noAnswerMs) : false;
+	const answered = await channel.waitUntilLive();
 	if (!answered) {
 		completionStatus = "no_answer";
 		endReason = "no_answer";
@@ -288,6 +429,9 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	}
 
 	// 8. Compliance disclosure is engine-enforced, then the configured greeting.
+	// session.say commits the message to chat context and emits a
+	// ConversationItemAdded on both channels: voice speaks it via TTS; text has
+	// no audio output, so the message rides the lk.chat egress (emitAgentTurn).
 	const opening: string[] = [];
 	if (config.compliance.aiDisclosure) {
 		opening.push(config.compliance.disclosureText ?? DEFAULT_DISCLOSURE);

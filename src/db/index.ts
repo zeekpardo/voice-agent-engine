@@ -188,6 +188,14 @@ const MIGRATIONS: { version: number; name: string; up: string }[] = [
 		// omits the field.
 		up: `ALTER TABLE calls ADD COLUMN IF NOT EXISTS contact_tags JSONB;`,
 	},
+	{
+		version: 5,
+		name: "calls-channel",
+		// Session channel (Phase 6 — channel abstraction): 'voice' (audio, today's
+		// default) or 'text' (lk.chat text streams). NOT NULL DEFAULT 'voice' so
+		// every existing row backfills to voice and old dispatches are unaffected.
+		up: `ALTER TABLE calls ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'voice';`,
+	},
 ];
 
 /** Apply pending migrations on boot. */

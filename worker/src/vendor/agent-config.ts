@@ -629,6 +629,18 @@ export const ContactTags = z.array(z.string().min(1));
 export type ContactTagsT = z.infer<typeof ContactTags>;
 
 /**
+ * Session channel (Phase 6 — channel abstraction). PER-CALL data, a sibling of
+ * contactState/contactTags in the session-create body + dispatch payload. Which
+ * I/O modality the session runs on: `voice` = STT/TTS/VAD over audio tracks
+ * (today's behavior, the default); `text` = LiveKit text streams on the `lk.chat`
+ * topic, no audio. The flow runtime (objectives, judge, memory, routers, exits,
+ * contact state, transcript flush, usage metering) is identical across channels —
+ * only the worker's I/O adapter differs. Omitted → voice.
+ */
+export const Channel = z.enum(["voice", "text"]);
+export type ChannelT = z.infer<typeof Channel>;
+
+/**
  * Structural sub-types derived from the ONE schema above (never hand-written).
  * The worker consumes these shapes; deriving them here keeps the worker's types
  * (via z.infer of the vendored copy) locked to the schema with zero drift.

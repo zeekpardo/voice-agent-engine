@@ -87,6 +87,10 @@ export default defineAgent({
 		}
 		const config: AgentConfig = bundle.agent.config;
 		const variables = dispatch.variables ?? {};
+		// Session channel (Phase 6): voice (default) or text. Selects the worker's
+		// I/O adapter in session-lifecycle; the flow runtime below is identical for
+		// both. Inbound/outbound dispatches omit it → voice.
+		const channel = dispatch.channel ?? "voice";
 		const endCallEnabled = config.endCall?.enabled !== false;
 		// Per-call known-contact data (Phase 1). A mutable copy: successful field
 		// writes (objectives / set_field) upsert into it so the next node's prompt
@@ -355,6 +359,7 @@ export default defineAgent({
 			agent,
 			greeting,
 			isInbound: !!rawMetadata.inbound,
+			channel,
 			objectiveUserTurnHook,
 			memoryUserTurnHook,
 		});

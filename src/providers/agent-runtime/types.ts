@@ -5,7 +5,7 @@
  * implement the same interface and consuming apps would never know.
  */
 
-import type { ContactStateEntryT } from "@voice-engine/shared/agent-config";
+import type { ChannelT, ContactStateEntryT } from "@voice-engine/shared/agent-config";
 
 export interface DispatchMetadata {
 	projectId: string;
@@ -18,6 +18,9 @@ export interface DispatchMetadata {
 	contactState?: ContactStateEntryT[];
 	/** Per-call CRM tag names (Phase 5b — seeds the worker's tag set). Optional. */
 	contactTags?: string[];
+	/** Session channel (Phase 6). Optional: old dispatches omit it → the worker
+	 * defaults to voice. `text` runs the flow over lk.chat text streams, no audio. */
+	channel?: ChannelT;
 }
 
 export interface WebSessionInput {

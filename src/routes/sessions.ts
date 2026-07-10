@@ -1,4 +1,4 @@
-import { ContactState, ContactTags } from "@voice-engine/shared/agent-config";
+import { Channel, ContactState, ContactTags } from "@voice-engine/shared/agent-config";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
@@ -24,6 +24,9 @@ const SessionBody = z.object({
 	contactState: ContactState.optional(),
 	/** Per-call CRM tag names (Phase 5b): sibling of contactState. Optional. */
 	contactTags: ContactTags.optional(),
+	/** Session channel (Phase 6): "voice" (default, audio) or "text" (lk.chat
+	 * text streams, no audio). Sibling of contactState/contactTags. Optional. */
+	channel: Channel.optional(),
 });
 
 sessions.post("/sessions", async (c) => {
@@ -44,6 +47,7 @@ sessions.post("/sessions", async (c) => {
 		metadata: body.metadata,
 		contactState: body.contactState,
 		contactTags: body.contactTags,
+		channel: body.channel,
 	});
 	return c.json(session, 201);
 });
