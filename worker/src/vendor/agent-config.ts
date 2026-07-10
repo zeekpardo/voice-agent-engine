@@ -144,6 +144,13 @@ export const AgentConfig = z.object({
 	 */
 	canvas: z.any().optional(),
 
+	/**
+	 * Opaque builder reference to the persona attached in the SaaS (identity/
+	 * tone layer compiled into `instructions`). The engine never reads it —
+	 * like `canvas`, it rides along so the builder round-trips the selection.
+	 */
+	personaId: z.string().nullish(),
+
 	// Multi-node flow (canvas-built agents). When present, the call runs as a
 	// graph of small agents: each node has its own instructions and gated
 	// tools, and moves to another node (or ends the call) through its exits.
