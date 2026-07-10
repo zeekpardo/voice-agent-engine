@@ -1,3 +1,4 @@
+import { ContactState } from "@voice-engine/shared/agent-config";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
@@ -31,6 +32,7 @@ const OutboundBody = z.object({
 	scheduled_at: z.string().datetime({ offset: true }).optional(),
 	variables: z.record(z.string()).optional(),
 	metadata: z.record(z.unknown()).optional(),
+	contactState: ContactState.optional(),
 });
 
 calls.post("/calls", async (c) => {
@@ -52,6 +54,7 @@ calls.post("/calls", async (c) => {
 		scheduledAt: body.scheduled_at ? new Date(body.scheduled_at) : undefined,
 		variables: body.variables,
 		metadata: body.metadata,
+		contactState: body.contactState,
 	});
 	return c.json(call, 201);
 });

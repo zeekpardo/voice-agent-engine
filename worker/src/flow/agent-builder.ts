@@ -82,6 +82,19 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 		const objectives = node.objectives ?? [];
 		const hasObjectives = objectives.length > 0;
 
+		// KNOWN CONTACT INFO (Phase 1 — the UNRESOLVED block). Rendered fresh on
+		// every node entry from the shared mutable contactState, so a field written
+		// in an earlier node shows its value here instead of UNRESOLVED. CRITICAL:
+		// "UNRESOLVED" lives ONLY in this model-facing instruction string — it is
+		// never a variable and never reaches interpolateSpoken/say, so it can never
+		// be spoken. Empty list → no block at all.
+		const contactInfo =
+			ctx.contactState.length > 0
+				? `\n\n## KNOWN CONTACT INFO\nYou already know these details about the caller. NEVER ask for a value shown here — if you need one, weave it in or confirm it naturally instead of asking. A field shown as UNRESOLVED is still unknown; those you MAY ask about. Never say the word "UNRESOLVED" aloud.\n${ctx.contactState
+						.map((e) => `${e.label} -> ${e.value != null && e.value !== "" ? e.value : "UNRESOLVED"}`)
+						.join("\n")}`
+				: "";
+
 		const nodeTools = buildTools(
 			bundle.tools.filter((t) => node.toolIds.includes(t.id as string)),
 			dispatch,
@@ -162,6 +175,7 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 								"\n",
 							)}\nThe system verifies these automatically as the caller answers and advances the conversation to the next stage on its own — never announce a stage change or rush the caller, and do not save these specific values with tools; they are recorded automatically.`
 					: "") +
+				contactInfo +
 				(toolExits.length > 0
 					? `\n\n## MOVING BETWEEN STAGES\nThis call flows through several stages and you handle ONLY this one. The moment the conversation satisfies an exit condition, call that exit tool (${exitNames}) IMMEDIATELY and SILENTLY. Changing stages is invisible to the caller: do NOT wrap up, do NOT say goodbye or "thanks for your time", do NOT announce a transfer or say you're passing them along — the very same voice simply continues the conversation.`
 					: "") +

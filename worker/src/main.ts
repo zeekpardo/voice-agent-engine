@@ -85,6 +85,10 @@ export default defineAgent({
 		const config: AgentConfig = bundle.agent.config;
 		const variables = dispatch.variables ?? {};
 		const endCallEnabled = config.endCall?.enabled !== false;
+		// Per-call known-contact data (Phase 1). A mutable copy: successful field
+		// writes (objectives / set_field) upsert into it so the next node's prompt
+		// rebuild reflects the new value. Never re-fetched mid-call.
+		const contactState = dispatch.contactState ? [...dispatch.contactState] : [];
 
 		// Global blocks shared by every node/agent (CloseBot "Job Information"
 		// + "Prohibited Words"): the root instructions are written ONCE and
@@ -210,6 +214,7 @@ export default defineAgent({
 				flow,
 				nodesById,
 				turns,
+				contactState,
 				get session() {
 					// Constructed by session-lifecycle (after the flow wiring);
 					// only read at call time, never during wiring.
@@ -252,6 +257,7 @@ export default defineAgent({
 			objectivesTracker = createObjectivesTracker({
 				dispatch,
 				turns,
+				contactState,
 				// Accessed lazily: the AgentSession isn't constructed until
 				// session-lifecycle runs, after this wiring.
 				get session() {

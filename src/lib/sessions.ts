@@ -1,3 +1,4 @@
+import type { ContactStateEntryT } from "@voice-engine/shared/agent-config";
 import { jsonb, sql } from "../db/index.js";
 import { agentRuntime } from "../providers/agent-runtime/index.js";
 import type { AgentRow } from "../routes/agents.js";
@@ -9,6 +10,8 @@ export interface CreateWebSessionInput {
 	agent: AgentRow;
 	variables?: Record<string, string>;
 	metadata?: Record<string, unknown>;
+	/** Per-call known-contact data (Phase 1); persisted + forwarded in dispatch. */
+	contactState?: ContactStateEntryT[];
 }
 
 export interface WebSessionResult {
@@ -30,11 +33,13 @@ export async function createWebSession(input: CreateWebSessionInput): Promise<We
 	const roomName = `va_${callId}`;
 	const variables = input.variables ?? {};
 	const metadata = input.metadata ?? {};
+	const contactState = input.contactState;
 
 	await sql`
-		INSERT INTO calls (id, project, agent_id, agent_version, direction, status, room_name, variables, metadata)
+		INSERT INTO calls (id, project, agent_id, agent_version, direction, status, room_name, variables, metadata, contact_state)
 		VALUES (${callId}, ${input.project}, ${input.agent.id}, ${input.agent.version},
-		        'web', 'queued', ${roomName}, ${jsonb(variables)}, ${jsonb(metadata)})`;
+		        'web', 'queued', ${roomName}, ${jsonb(variables)}, ${jsonb(metadata)},
+		        ${contactState ? jsonb(contactState) : null})`;
 
 	const { roomUrl, token } = await agentRuntime.createWebSession({
 		roomName,
@@ -46,6 +51,7 @@ export async function createWebSession(input: CreateWebSessionInput): Promise<We
 			callId,
 			variables,
 			metadata,
+			...(contactState ? { contactState } : {}),
 		},
 	});
 

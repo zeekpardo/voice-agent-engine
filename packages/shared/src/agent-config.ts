@@ -184,6 +184,12 @@ export const AgentConfig = z.object({
 									/** Judge strictness 0-100: rating required to mark the objective
 									 * met (CloseBot "Sensitivity"). Default 90. */
 									sensitivity: z.number().min(0).max(100).optional(),
+									/** When this objective's `field` already has a value in the
+									 * per-call contactState, start it MET with that value (no judge,
+									 * no re-asking — CloseBot's "don't ask what you already know").
+									 * Set false to force asking even when the value is known.
+									 * Default true. */
+									skipIfKnown: z.boolean().default(true),
 								}),
 							)
 							.optional(),
@@ -429,6 +435,26 @@ export type AgentConfigT = z.infer<typeof AgentConfig>;
 
 /** Partial version for PATCH — validated after merging over the stored config. */
 export const AgentConfigPatch = AgentConfig.partial();
+
+/**
+ * Contact state (Phase 1 — the UNRESOLVED block). PER-CALL data, deliberately
+ * NOT part of AgentConfig: the SaaS builds it fresh per dispatch from the
+ * caller's CRM record and sends it as a sibling of `variables`/`metadata` in the
+ * session-create payload; it rides in the dispatch metadata to the worker.
+ *
+ * ENGINE NEUTRALITY: opaque generic key/label/value triples — no CRM-specific
+ * naming. `key` is the field identifier the engine matches objective/set_field
+ * writes against; `label` is the human phrasing the prompt shows; `value` is the
+ * known value, or null when unknown (rendered as UNRESOLVED in the instruction
+ * block only — never spoken).
+ */
+export const ContactStateEntry = z.object({
+	key: z.string().min(1),
+	label: z.string().min(1),
+	value: z.string().nullable(),
+});
+export const ContactState = z.array(ContactStateEntry);
+export type ContactStateEntryT = z.infer<typeof ContactStateEntry>;
 
 /**
  * Structural sub-types derived from the ONE schema above (never hand-written).

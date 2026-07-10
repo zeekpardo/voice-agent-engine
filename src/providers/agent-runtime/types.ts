@@ -5,6 +5,8 @@
  * implement the same interface and consuming apps would never know.
  */
 
+import type { ContactStateEntryT } from "@voice-engine/shared/agent-config";
+
 export interface DispatchMetadata {
 	projectId: string;
 	agentId: string;
@@ -12,6 +14,8 @@ export interface DispatchMetadata {
 	callId: string;
 	variables: Record<string, string>;
 	metadata: Record<string, unknown>;
+	/** Per-call known-contact data (Phase 1). Optional: old dispatches omit it. */
+	contactState?: ContactStateEntryT[];
 }
 
 export interface WebSessionInput {

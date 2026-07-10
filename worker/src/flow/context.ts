@@ -1,7 +1,14 @@
 import type { JobContext, inference, llm, voice } from "@livekit/agents";
 import { inference as inferenceNs } from "@livekit/agents";
 import type { JSONSchema7 } from "json-schema";
-import type { AgentBundle, AgentConfig, DispatchMetadata, FlowNode, ToolDef } from "../gateway.js";
+import type {
+	AgentBundle,
+	AgentConfig,
+	ContactStateEntryT,
+	DispatchMetadata,
+	FlowNode,
+	ToolDef,
+} from "../gateway.js";
 
 /**
  * Shared runtime context for the flow subsystem (spec §7). main.ts's entry
@@ -167,6 +174,15 @@ export interface FlowRuntimeContext {
 	// live transcript (shared with session-lifecycle + objectives)
 	turns: Turn[];
 
+	/**
+	 * Per-call known-contact data (Phase 1). A MUTABLE holder (stable array
+	 * reference, mutated in place via upsertContactState) so a field write in one
+	 * node is reflected in the next node's prompt rebuild. Opaque to the engine —
+	 * generic key/label/value, no CRM meaning. Empty array when the dispatch
+	 * carried none.
+	 */
+	contactState: ContactStateEntryT[];
+
 	// lazy runtime, owned by session-lifecycle
 	readonly session: voice.AgentSession;
 	hangUp(reason: string): Promise<void>;
@@ -207,4 +223,30 @@ export interface FlowRuntimeContext {
 export function findToolDef(tools: ToolDef[], toolId: string | undefined): ToolDef | undefined {
 	if (!toolId) return undefined;
 	return tools.find((t) => t.name === toolId) ?? tools.find((t) => t.id === toolId);
+}
+
+/**
+ * Reflect a successful field write into the in-memory contactState (Phase 1
+ * live updates): match an existing entry by `key` and overwrite its value, or
+ * append a best-effort entry when the written field isn't in the list yet. The
+ * next node's prompt rebuild then shows the value instead of UNRESOLVED. Mutates
+ * the array in place so the shared reference stays live. `key` is the opaque
+ * field identifier (objective.field / setField.field) — matched against the
+ * entry key with no CRM interpretation.
+ */
+export function upsertContactState(
+	list: ContactStateEntryT[],
+	key: string,
+	value: string,
+	label?: string,
+): void {
+	if (!key) return;
+	const existing = list.find((e) => e.key === key);
+	if (existing) {
+		existing.value = value;
+	} else {
+		// Best-effort label when the write targets a field not in the injected
+		// list: fall back to the raw key so the prompt still reads sensibly.
+		list.push({ key, label: label ?? key, value });
+	}
 }

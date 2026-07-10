@@ -1,5 +1,7 @@
+import type { ContactStateEntryT } from "@voice-engine/shared/agent-config";
 import { jsonb, sql } from "../db/index.js";
 import { agentRuntime } from "../providers/agent-runtime/index.js";
+import type { DispatchMetadata } from "../providers/agent-runtime/types.js";
 import type { AgentRow } from "../routes/agents.js";
 import { logCallEvent } from "./call-events.js";
 import { newId } from "./id.js";
@@ -19,6 +21,7 @@ export interface CreateOutboundInput {
 	scheduledAt?: Date;
 	variables?: Record<string, string>;
 	metadata?: Record<string, unknown>;
+	contactState?: ContactStateEntryT[];
 }
 
 export async function createOutboundCall(input: CreateOutboundInput) {
@@ -28,12 +31,13 @@ export async function createOutboundCall(input: CreateOutboundInput) {
 
 	await sql`
 		INSERT INTO calls (id, project, agent_id, agent_version, direction, status,
-		                   to_number, from_number, room_name, scheduled_at, variables, metadata)
+		                   to_number, from_number, room_name, scheduled_at, variables, metadata, contact_state)
 		VALUES (${callId}, ${input.project}, ${input.agent.id}, ${input.agent.version},
 		        'outbound', ${scheduled ? "scheduled" : "queued"},
 		        ${input.to}, ${input.from ?? null}, ${roomName},
 		        ${input.scheduledAt ?? null},
-		        ${jsonb(input.variables ?? {})}, ${jsonb(input.metadata ?? {})})`;
+		        ${jsonb(input.variables ?? {})}, ${jsonb(input.metadata ?? {})},
+		        ${input.contactState ? jsonb(input.contactState) : null})`;
 
 	const eventType = scheduled ? "call.scheduled" : "call.queued";
 	await logCallEvent(
@@ -80,6 +84,9 @@ export async function dispatchOutbound(callId: string): Promise<void> {
 				callId,
 				variables: (call.variables ?? {}) as Record<string, string>,
 				metadata: (call.metadata ?? {}) as Record<string, unknown>,
+				...(call.contact_state
+					? { contactState: call.contact_state as DispatchMetadata["contactState"] }
+					: {}),
 			},
 		});
 		await logCallEvent(sql, { callId, type: "call.dialing", payload: { to: call.to_number } });

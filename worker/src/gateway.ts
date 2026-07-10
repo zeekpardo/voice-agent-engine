@@ -19,8 +19,9 @@ export type {
 	FlowNode,
 	FlowScenario,
 	FlowObjective,
+	ContactStateEntryT,
 } from "./vendor/agent-config.js";
-import type { AgentConfigT } from "./vendor/agent-config.js";
+import type { AgentConfigT, ContactStateEntryT } from "./vendor/agent-config.js";
 
 export interface DispatchMetadata {
 	projectId: string;
@@ -29,6 +30,9 @@ export interface DispatchMetadata {
 	callId: string;
 	variables: Record<string, string>;
 	metadata: Record<string, unknown>;
+	/** Per-call known-contact data (Phase 1). Optional: old dispatches omit it.
+	 * Opaque generic key/label/value — the engine never reads CRM meaning into it. */
+	contactState?: ContactStateEntryT[];
 }
 
 /**

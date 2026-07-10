@@ -1,7 +1,7 @@
 import { llm } from "@livekit/agents";
 import { reportEvent } from "../gateway.js";
 import { invokeTool } from "../tools.js";
-import type { FlowRuntimeContext } from "./context.js";
+import { type FlowRuntimeContext, upsertContactState } from "./context.js";
 import type { ResolvedTarget } from "./objectives.js";
 
 /**
@@ -72,9 +72,13 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 				// config's designated field-write tool is used (engine neutrality).
 				const fieldWriteDef = ctx.resolveToolDef(sf?.toolId, ctx.fieldWriteDef);
 				if (sf?.field && fieldWriteDef) {
+					const written = ctx.interpolate(sf.value ?? "");
+					// Reflect the write into the in-memory contactState so a later
+					// node's prompt shows the value instead of UNRESOLVED (Phase 1).
+					upsertContactState(ctx.contactState, sf.field, written);
 					void invokeTool(fieldWriteDef, dispatch, {
 						field_name: sf.field,
-						value: ctx.interpolate(sf.value ?? ""),
+						value: written,
 					}).catch((err) => console.error(`flow: set_field "${sf.field}" failed`, err));
 				}
 				const exit = node.exits[0];

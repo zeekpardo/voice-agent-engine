@@ -164,6 +164,13 @@ const MIGRATIONS: { version: number; name: string; up: string }[] = [
 			ON webhook_deliveries(next_attempt_at) WHERE status = 'pending';
 		`,
 	},
+	{
+		version: 2,
+		name: "calls-contact-state",
+		// Per-call known-contact data (Phase 1). Nullable: old rows / calls
+		// created without contactState stay NULL and dispatch omits the field.
+		up: `ALTER TABLE calls ADD COLUMN IF NOT EXISTS contact_state JSONB;`,
+	},
 ];
 
 /** Apply pending migrations on boot. */

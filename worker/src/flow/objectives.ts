@@ -1,6 +1,13 @@
 import { llm, voice } from "@livekit/agents";
-import { type DispatchMetadata, type FlowObjective, type ToolDef, reportEvent } from "../gateway.js";
+import {
+	type ContactStateEntryT,
+	type DispatchMetadata,
+	type FlowObjective,
+	type ToolDef,
+	reportEvent,
+} from "../gateway.js";
 import { invokeTool } from "../tools.js";
+import { upsertContactState } from "./context.js";
 
 /**
  * Objective-driven nodes (voiceagent-engine/objectives-and-conversation-spec.md).
@@ -61,6 +68,10 @@ export interface ObjectivesDeps {
 	dispatch: DispatchMetadata;
 	/** Live transcript buffer (main.ts's `turns`); read-only here. */
 	turns: ObjectiveTurn[];
+	/** Shared mutable per-call contact state (Phase 1). Read at arm() for
+	 * skipIfKnown; written (upsert) when a verified objective field is saved so
+	 * the next node's prompt reflects it. Same array reference threaded from main.ts. */
+	contactState: ContactStateEntryT[];
 	session: voice.AgentSession;
 	buildLlm: (over?: {
 		model?: string;
@@ -136,7 +147,7 @@ function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promi
 }
 
 export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
-	const { dispatch, turns, session, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, hangUp, isCompleted } =
+	const { dispatch, turns, contactState, session, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, hangUp, isCompleted } =
 		deps;
 	const defaultJudgeLlm = buildLlm({ model: "grok-4-fast", temperature: 0, maxTokens: 400 });
 
@@ -152,9 +163,16 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 		}
 		// Snap to the exact picklist option when one matches case-insensitively.
 		const option = objective.options?.find((v) => v.toLowerCase() === answer.toLowerCase());
+		const written = option ?? answer;
+		// Reflect the write into the in-memory contactState so the next node's
+		// prompt shows the value instead of UNRESOLVED (Phase 1 live updates).
+		upsertContactState(contactState, objective.field, written);
+		console.log(
+			`flow: contactState updated ${objective.field} -> "${written}" | now: ${JSON.stringify(contactState)}`,
+		);
 		void invokeTool(fieldWriteDef, dispatch, {
 			field_name: objective.field,
-			value: option ?? answer,
+			value: written,
 		}).catch((err) => console.error(`flow: objective field write failed (${objective.field})`, err));
 	};
 
@@ -213,6 +231,7 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 				key: objective.key,
 				rating,
 				answer: progress.answer.slice(0, 200),
+				source: "judge",
 			});
 			// "N/A" = a conditional objective whose condition didn't apply —
 			// satisfied, but nothing to write to the CRM.
@@ -284,20 +303,47 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 		arm(node: ObjectiveNodeInfo): void {
 			// Rebuilt fresh on every entry — re-entering a node restarts its
 			// goals.
-			activeObjectives =
-				node.objectives.length > 0
-					? {
-							nodeId: node.id,
-							exitName: node.primaryExit.name,
-							target: node.primaryExit.target,
-							judge: node.judge,
-							objectives: node.objectives,
-							state: new Map(node.objectives.map((o) => [o.key, { met: false, attempts: 0, skipped: false }])),
-							judging: false,
-							rerun: false,
-							transitioning: false,
-						}
-					: null;
+			if (node.objectives.length === 0) {
+				activeObjectives = null;
+				return;
+			}
+			const rt: ObjectiveRuntime = {
+				nodeId: node.id,
+				exitName: node.primaryExit.name,
+				target: node.primaryExit.target,
+				judge: node.judge,
+				objectives: node.objectives,
+				state: new Map(node.objectives.map((o) => [o.key, { met: false, attempts: 0, skipped: false }])),
+				judging: false,
+				rerun: false,
+				transitioning: false,
+			};
+			// skipIfKnown (Phase 1): an objective whose `field` already has a
+			// non-null value in the per-call contactState starts MET with that
+			// value — no judge, no re-asking. skipIfKnown:false forces asking.
+			for (const o of node.objectives) {
+				if (o.skipIfKnown === false || !o.field) continue;
+				const known = contactState.find((e) => e.key === o.field);
+				if (!known || known.value == null || known.value === "") continue;
+				const progress = rt.state.get(o.key)!;
+				progress.met = true;
+				progress.rating = 100;
+				progress.answer = known.value;
+				// Same event as a judge completion, marked source "known" — no field
+				// write (the value already lives in the CRM / contactState).
+				reportEvent(dispatch.callId, "flow.objective", {
+					node: rt.nodeId,
+					key: o.key,
+					rating: 100,
+					answer: known.value.slice(0, 200),
+					source: "known",
+				});
+				console.log(`flow: objective "${o.key}" met from known contact field "${o.field}" (skipIfKnown)`);
+			}
+			activeObjectives = rt;
+			// If every required objective was already known, advance immediately
+			// (guards + idle-wait live in maybeCompleteObjectives).
+			maybeCompleteObjectives(rt);
 		},
 		onUserTurn(): void {
 			const rt = activeObjectives;
