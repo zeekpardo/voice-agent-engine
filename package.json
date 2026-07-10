@@ -9,6 +9,7 @@
 		"start": "tsx src/index.ts",
 		"key:mint": "tsx scripts/mint-key.ts",
 		"key:list": "tsx scripts/list-keys.ts",
+		"sync:worker": "tsx scripts/sync-worker-vendor.ts",
 		"typecheck": "tsc --noEmit"
 	},
 	"dependencies": {

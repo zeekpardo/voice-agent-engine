@@ -1,3 +1,13 @@
+// ============================================================================
+// DO NOT EDIT — GENERATED FILE.
+//
+// Vendored verbatim from packages/shared/src/slugify.ts by `pnpm sync:worker`.
+// The worker builds standalone (`lk agent deploy` uses worker/ as the entire
+// Docker build context), so it can't import @voice-engine/shared. Edit the
+// canonical file in packages/shared/src/ and re-run `pnpm sync:worker`.
+// CI runs `pnpm sync:worker --check` to fail on drift.
+// ============================================================================
+
 /**
  * Canonical id-safe slug used by the gateway (root) to turn free-text names
  * (flow node exit names, scenario names, …) into `[a-z0-9_]` tool-id fragments:

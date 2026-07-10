@@ -23,13 +23,15 @@ Hard constraints unique to the worker:
 1. **NO workspace imports.** `lk agent deploy` builds the image with `worker/` as
    the ENTIRE build context, and `worker/Dockerfile` runs `pnpm install` before
    copying the rest of the repo. So you CANNOT `import` `@voice-engine/shared` or
-   anything from the repo's `src/`. Anything shared is hand-copied into the
-   worker with a pointer comment. If you change a hand-synced copy, update its
-   canonical source too (and vice versa). The pairs:
-   - `worker/src/tools.ts` `sign()` ⇄ `packages/shared/src/hmac.ts` `signPayload`
-   - `worker/src/flow/agent-builder.ts` `sanitize()` ⇄ `packages/shared/src/slugify.ts`
-   - `worker/src/gateway.ts` `AgentConfig`/`FlowNode` types ⇄ `src/lib/agent-config.ts`
-   Preserve the pointer comments. Prefer running `sync-checker` after such edits.
+   anything from the repo's `src/`. Instead, `packages/shared/src/*` is
+   **vendored** into `worker/src/vendor/` by `pnpm sync:worker`, and the worker
+   imports `./vendor/*`. Do NOT hand-edit `worker/src/vendor/*` (generated,
+   DO-NOT-EDIT header) — edit the canonical file in `packages/shared/src/`, then
+   run `pnpm sync:worker`. The vendored set:
+   - `packages/shared/src/hmac.ts` → `worker/src/vendor/hmac.ts` (used as `sign` in `tools.ts`)
+   - `packages/shared/src/slugify.ts` → `worker/src/vendor/slugify.ts` (used as `sanitize` in `flow/agent-builder.ts`)
+   - `packages/shared/src/agent-config.ts` → `worker/src/vendor/agent-config.ts` (`gateway.ts` derives its config types via `z.infer`)
+   After a shared edit, run `pnpm sync:worker` (or `--check`) / the `sync-checker` agent.
 
 2. **Engine neutrality.** No CRM/business logic. Tools are opaque signed webhooks;
    `set_field`/`modify_tags` carry opaque strings the SaaS side interprets. Do

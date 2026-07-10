@@ -1,3 +1,13 @@
+// ============================================================================
+// DO NOT EDIT — GENERATED FILE.
+//
+// Vendored verbatim from packages/shared/src/hmac.ts by `pnpm sync:worker`.
+// The worker builds standalone (`lk agent deploy` uses worker/ as the entire
+// Docker build context), so it can't import @voice-engine/shared. Edit the
+// canonical file in packages/shared/src/ and re-run `pnpm sync:worker`.
+// CI runs `pnpm sync:worker --check` to fail on drift.
+// ============================================================================
+
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 /**

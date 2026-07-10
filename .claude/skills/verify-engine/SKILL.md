@@ -9,8 +9,18 @@ description: >-
 
 # verify-engine
 
-This repo has **no test runner**. "Verified" means: everything typechecks. Run
-all three, from the repo root (`/Users/zeek/Projects/voice-agent-engine`).
+This repo has **no test runner**. "Verified" means: everything typechecks and
+the worker's vendored copies are in sync. Run all four, from the repo root
+(`/Users/zeek/Projects/voice-agent-engine`).
+
+## 0. Worker vendor in sync
+
+If you touched `packages/shared/src/*` (hmac / slugify / agent-config), the
+worker's vendored copies must be regenerated first:
+
+```bash
+pnpm sync:worker --check    # nonzero on drift → run `pnpm sync:worker` to fix
+```
 
 ## 1. Gateway (root) + shared
 
@@ -51,7 +61,7 @@ kit sources parse and their `@voice-engine/shared` imports resolve.
 
 ## Reporting
 
-State pass/fail for each of the three steps. If a synced-pair file changed as
-part of the work, also run the `sync-checker` agent (typecheck won't catch
-logic/scheme drift between hand-copied code). Do not claim "verified" unless
-steps 1 and 2 are clean.
+State pass/fail for each step. If `packages/shared/src/*` changed as part of the
+work, `pnpm sync:worker --check` (step 0) must be clean — vendored drift means the
+worker is building against stale code. Do not claim "verified" unless steps 0, 1,
+and 2 are clean.

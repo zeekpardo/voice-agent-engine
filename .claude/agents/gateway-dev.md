@@ -31,10 +31,12 @@ Ground rules:
   - Query Postgres through the `sql` client and `jsonb()` from `src/db`.
     `logCallEvent` and similar accept either the top-level `sql` or a
     `sql.begin(...)` transaction — thread the tx through when in one.
-- **The AgentConfig/FlowNode schema is a synced surface.** `src/lib/agent-config.ts`
-  (Zod) is hand-mirrored as TS interfaces in `worker/src/gateway.ts`. If you add
-  or change a field there, you MUST update the worker copy too (or hand off to
-  sync-checker / the sync-worker-copies skill). Keep fields neutral.
+- **The AgentConfig/FlowNode schema is a vendored surface.** It now lives in
+  `packages/shared/src/agent-config.ts`; `src/lib/agent-config.ts` re-exports it,
+  and the worker consumes a **vendored** copy (`worker/src/vendor/agent-config.ts`,
+  types via `z.infer`). If you add or change a field, edit the shared schema and
+  run `pnpm sync:worker` to re-vendor it (or hand off to sync-checker / the
+  sync-worker-copies skill). Keep fields neutral.
 - Schemas use `.default(...)` heavily; preserve the Output/Input generic split
   that `parseOrThrow` relies on.
 

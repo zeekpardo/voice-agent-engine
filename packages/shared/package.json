@@ -3,10 +3,14 @@
 	"version": "0.1.0",
 	"private": true,
 	"type": "module",
-	"description": "Zero-dependency helpers shared across the gateway (root), kit, and (manually, see worker/src/tools.ts and worker/src/main.ts) worker: HMAC webhook signing/verification and id-safe slugify.",
+	"description": "Canonical shared code for the gateway (root) and kit: HMAC webhook signing/verification, id-safe slugify, and the AgentConfig/flow zod schema. Vendored into the worker (which can't import workspace packages) via `pnpm sync:worker`.",
 	"exports": {
 		"./hmac": "./src/hmac.ts",
-		"./slugify": "./src/slugify.ts"
+		"./slugify": "./src/slugify.ts",
+		"./agent-config": "./src/agent-config.ts"
+	},
+	"dependencies": {
+		"zod": "^3.24.1"
 	},
 	"devDependencies": {
 		"typescript": "^5.7.3"
