@@ -153,12 +153,14 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 		}
 	});
 
-	const usage = { llmIn: 0, llmOut: 0, ttsChars: 0, sttMs: 0 };
+	const usage = { ttsChars: 0, sttMs: 0 };
 	session.on(voice.AgentSessionEventTypes.MetricsCollected, (ev) => {
 		const m = ev.metrics;
 		if (m.type === "llm_metrics") {
-			usage.llmIn += m.promptTokens;
-			usage.llmOut += m.completionTokens;
+			// The session drives ONLY the responder the caller hears; the judge,
+			// summary and router calls are standalone and meter themselves off their
+			// collected responses (Phase 4). So every session llm_metrics is "respond".
+			state.usage.record("respond", m.promptTokens, m.completionTokens);
 		} else if (m.type === "tts_metrics") {
 			usage.ttsChars += m.charactersCount;
 		} else if (m.type === "stt_metrics") {
@@ -174,6 +176,12 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 		if (state.completed) return;
 		state.completed = true;
 		const durationSeconds = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+		// Per-class breakdown (Phase 4): respond (session) + judge + summary + router.
+		// The legacy llm_tokens_in/out meters stay intact as the SUM across every
+		// class — previously the judge/router were unmetered, so the total now also
+		// captures them (summary was already folded in via the old auxUsage sink).
+		const byClass = state.usage.byClass();
+		const totals = state.usage.totals();
 		await reportCompletion(dispatch.callId, {
 			status: completionStatus,
 			end_reason: endReason,
@@ -181,13 +189,17 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 			transcript: { turns },
 			usage: [
 				{ kind: "call_minutes", quantity: durationSeconds / 60 },
-				// Fold in standalone summary-call tokens (state.auxUsage) not seen by
-				// the session's own MetricsCollected, so rolling-memory cost is visible.
-				{ kind: "llm_tokens_in", quantity: usage.llmIn + state.auxUsage.llmIn },
-				{ kind: "llm_tokens_out", quantity: usage.llmOut + state.auxUsage.llmOut },
+				{ kind: "llm_tokens_in", quantity: totals.tokensIn },
+				{ kind: "llm_tokens_out", quantity: totals.tokensOut },
 				{ kind: "tts_characters", quantity: usage.ttsChars },
 				{ kind: "stt_seconds", quantity: usage.sttMs / 1000 },
 			],
+			usage_by_class: {
+				respond: { tokens_in: byClass.respond.tokensIn, tokens_out: byClass.respond.tokensOut, calls: byClass.respond.calls },
+				judge: { tokens_in: byClass.judge.tokensIn, tokens_out: byClass.judge.tokensOut, calls: byClass.judge.calls },
+				summary: { tokens_in: byClass.summary.tokensIn, tokens_out: byClass.summary.tokensOut, calls: byClass.summary.calls },
+				router: { tokens_in: byClass.router.tokensIn, tokens_out: byClass.router.tokensOut, calls: byClass.router.calls },
+			},
 		});
 	};
 

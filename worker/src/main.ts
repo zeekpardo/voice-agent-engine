@@ -11,9 +11,11 @@ import {
 import {
 	type FlowRuntimeContext,
 	type FlowRuntimeState,
+	type ResolvedModels,
 	type Turn,
 	buildTts,
 	collectMissingVars,
+	createUsageRecorder,
 	findToolDef,
 	inferenceModel,
 	interpolate,
@@ -101,6 +103,12 @@ export default defineAgent({
 		};
 		const rollingSummary = { text: "" };
 
+		// Per-class model tiers (Phase 4). Each defaults to today's behavior:
+		// respond → config.llm.model (buildLlm's own default), judge → grok-4-fast,
+		// summary → config.memory.model then grok-4-fast, router → config.llm.model.
+		// A tier is only the DEFAULT for its class — per-node overrides still win.
+		const models: ResolvedModels = config.models ?? {};
+
 		// Global blocks shared by every node/agent (CloseBot "Job Information"
 		// + "Prohibited Words"): the root instructions are written ONCE and
 		// inherited everywhere, so node prompts stay lean stage instructions.
@@ -151,7 +159,7 @@ export default defineAgent({
 			transferInFlight: false,
 			ttsOverride: undefined,
 			conversationTimer: undefined,
-			auxUsage: { llmIn: 0, llmOut: 0 },
+			usage: createUsageRecorder(),
 		};
 
 		const EMPTY_PARAMS = {
@@ -192,7 +200,10 @@ export default defineAgent({
 					max_completion_tokens: over?.maxTokens ?? config.llm.maxTokens,
 				},
 			});
-		const defaultLlm = buildLlm();
+		// Respond tier (Phase 4): the responder the caller hears. models.respond
+		// overrides config.llm.model; unset → buildLlm's own config.llm.model default.
+		// Per-node node.llm still wins (agent-builder builds those separately).
+		const defaultLlm = buildLlm({ model: models.respond });
 
 		// 3. Assemble the active agent. A flow config runs as a graph of small
 		//    agents — one per node, each with its own instructions and gated
@@ -246,6 +257,8 @@ export default defineAgent({
 				buildLlm,
 				defaultLlm,
 				buildTts,
+				recordUsage: (cls, inTok, outTok) => state.usage.record(cls, inTok, outTok),
+				models,
 				globalInstructions,
 				pacingRules,
 				missingNote,
@@ -288,6 +301,9 @@ export default defineAgent({
 				startTransfer,
 				hangUp: (reason: string) => state.hangUp(reason),
 				isCompleted: () => state.completed,
+				// Judge tier (Phase 4): default judge model; per-node node.judge still wins.
+				judgeModel: models.judge,
+				recordUsage: (inTok, outTok) => state.usage.record("judge", inTok, outTok),
 			});
 			objectiveUserTurnHook = () => objectivesTracker.onUserTurn();
 
@@ -303,10 +319,9 @@ export default defineAgent({
 					memory,
 					buildLlm,
 					getSession: () => state.session,
-					recordUsage: (inTok, outTok) => {
-						state.auxUsage.llmIn += inTok;
-						state.auxUsage.llmOut += outTok;
-					},
+					// Summary tier (Phase 4): memory.model wins, then models.summary, then grok-4-fast.
+					summaryModel: models.summary,
+					recordUsage: (inTok, outTok) => state.usage.record("summary", inTok, outTok),
 				});
 				memoryUserTurnHook = () => memoryTracker.onUserTurn();
 			}

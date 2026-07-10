@@ -92,12 +92,23 @@ export function reportEvent(callId: string, type: string, payload: Record<string
 	}).catch((err) => console.error(`event report failed (${type})`, err));
 }
 
+/** Per-call-class token usage (Phase 4). tokens_in/out sum to the flat
+ * llm_tokens_in/out meters; carried as a JSONB breakdown on completion. */
+export interface UsageByClass {
+	respond: { tokens_in: number; tokens_out: number; calls: number };
+	judge: { tokens_in: number; tokens_out: number; calls: number };
+	summary: { tokens_in: number; tokens_out: number; calls: number };
+	router: { tokens_in: number; tokens_out: number; calls: number };
+}
+
 export interface CompletionReport {
 	status?: "completed" | "failed" | "no_answer" | "voicemail";
 	end_reason: string;
 	duration_seconds?: number;
 	transcript?: { turns: { role: "agent" | "user" | "system"; text: string; ts?: number }[] };
 	usage: { kind: string; quantity: number }[];
+	/** Per-class LLM usage breakdown (respond/judge/summary/router). */
+	usage_by_class?: UsageByClass;
 }
 
 /** End-of-call flush — the gateway takes it from here (summary, extraction, fan-out). */

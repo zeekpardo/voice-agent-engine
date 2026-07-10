@@ -124,6 +124,22 @@ calls.get("/calls/:id/transcript", async (c) => {
 	});
 });
 
+/**
+ * Per-call usage rows, including the Phase 4 per-class LLM breakdown. The
+ * llm_tokens_in/out rows carry a `breakdown` JSONB { respond|judge|summary|router
+ * -> tokens (+ a nested `calls` count map) }, so consuming apps can see where the
+ * model spend went per call without a separate analytics pipeline.
+ */
+calls.get("/calls/:id/usage", async (c) => {
+	const key = c.get("apiKey");
+	const call = await getCall(key.project, c.req.param("id"));
+	if (!call) throw notFound();
+	const rows = await sql`
+		SELECT kind, quantity, breakdown, created_at FROM usage_events
+		WHERE call_id = ${call.id as string} ORDER BY kind`;
+	return c.json({ call_id: call.id, usage: rows });
+});
+
 calls.get("/calls/:id/events", async (c) => {
 	const key = c.get("apiKey");
 	const call = await getCall(key.project, c.req.param("id"));

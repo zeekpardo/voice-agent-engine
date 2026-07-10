@@ -179,8 +179,14 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 			let chosen = fallbackExit;
 			let decision = "";
 			try {
-				const evalLlm = node.llm ? ctx.buildLlm(node.llm) : ctx.defaultLlm;
+				// Router tier (Phase 4): a DEDICATED instance (never the shared
+				// defaultLlm) so this standalone evaluation's tokens are metered as
+				// "router" and never double-counted by the session's responder
+				// MetricsCollected. node.llm override wins; else config.models.router,
+				// else config.llm.model (today's behavior).
+				const evalLlm = node.llm ? ctx.buildLlm(node.llm) : ctx.buildLlm({ model: ctx.models.router });
 				const res = await evalLlm.chat({ chatCtx: evalCtx }).collect();
+				ctx.recordUsage("router", res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
 				decision = res.text.trim();
 				const lower = decision.toLowerCase();
 				chosen =

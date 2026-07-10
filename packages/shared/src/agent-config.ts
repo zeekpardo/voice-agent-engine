@@ -38,6 +38,24 @@ export const AgentConfig = z.object({
 			maxTokens: z.number().int().positive().default(400), // keep spoken turns short
 		})
 		.default({}),
+	/**
+	 * Per-class model tiers (Phase 4 — cost instrumentation & judge starvation).
+	 * Optional; each defaults to today's behavior so old configs are unaffected:
+	 *   respond  → config.llm.model (the responder the caller hears);
+	 *   judge    → the cheap grok-4-fast objective judge;
+	 *   summary  → config.memory.model, then grok-4-fast;
+	 *   router   → config.llm.model (today's router evaluation model).
+	 * A tier only sets the DEFAULT model for that call class — per-node overrides
+	 * (node.llm, node.judge.model) always take precedence over the tier.
+	 */
+	models: z
+		.object({
+			respond: z.string().min(1).optional(),
+			judge: z.string().min(1).optional(),
+			summary: z.string().min(1).optional(),
+			router: z.string().min(1).optional(),
+		})
+		.optional(),
 	stt: z
 		.object({
 			provider: z.string().default("xai"),

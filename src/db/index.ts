@@ -171,6 +171,15 @@ const MIGRATIONS: { version: number; name: string; up: string }[] = [
 		// created without contactState stay NULL and dispatch omits the field.
 		up: `ALTER TABLE calls ADD COLUMN IF NOT EXISTS contact_state JSONB;`,
 	},
+	{
+		version: 3,
+		name: "usage-events-breakdown",
+		// Per-class LLM usage breakdown (Phase 4). Nullable JSONB carried on the
+		// llm_tokens_in/out rows: { respond|judge|summary|router -> tokens+calls }.
+		// A single flexible column instead of a fixed set of per-class columns, so
+		// new call classes don't require a schema change.
+		up: `ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS breakdown JSONB;`,
+	},
 ];
 
 /** Apply pending migrations on boot. */

@@ -41,7 +41,10 @@ export interface MemoryDeps {
 	/** AgentSession getter — lazy; only read at call time (post-refresh live
 	 * compaction), never during wiring. */
 	getSession: () => voice.AgentSession | undefined;
-	/** Fold summary-call token usage into the completion meters (Phase 3). */
+	/** Summary model tier (config.models.summary). memory.model wins over this;
+	 * both unset → grok-4-fast (unchanged). */
+	summaryModel?: string;
+	/** Record one summary-call's token usage under the "summary" class (Phase 4). */
 	recordUsage: (promptTokens: number, completionTokens: number) => void;
 }
 
@@ -76,14 +79,13 @@ const SUMMARY_SYSTEM =
 	"You maintain a running summary of an ongoing phone call. Given the earlier portion of the conversation, produce a concise, factual bullet list (one short bullet per line, prefixed with '- ') capturing the durable facts, decisions, preferences, and context established so far — everything a colleague would need to continue seamlessly. Omit greetings, filler, and pleasantries. Do not invent anything. Output ONLY the bullet lines, no preamble or headings.";
 
 export function createMemoryTracker(deps: MemoryDeps): MemoryTracker {
-	const { dispatch, turns, rollingSummary, memory, buildLlm, getSession, recordUsage } = deps;
+	const { dispatch, turns, rollingSummary, memory, buildLlm, getSession, summaryModel, recordUsage } = deps;
 
-	// One reusable cheap LLM (temp 0). Its own metrics_collected feeds the aux
-	// usage sink — the session's MetricsCollected never sees this standalone call.
-	const summaryLlm = buildLlm({ model: memory.model ?? "grok-4-fast", temperature: 0, maxTokens: 400 });
-	summaryLlm.on("metrics_collected", (m: { promptTokens: number; completionTokens: number }) => {
-		recordUsage(m.promptTokens ?? 0, m.completionTokens ?? 0);
-	});
+	// One reusable cheap LLM (temp 0). Summary tier (Phase 4): the per-config
+	// memory.model wins, then config.models.summary, then grok-4-fast. This is a
+	// standalone call the session's MetricsCollected never sees — usage is read
+	// straight off each collected response (see regenerate) into the "summary" class.
+	const summaryLlm = buildLlm({ model: memory.model ?? summaryModel ?? "grok-4-fast", temperature: 0, maxTokens: 400 });
 
 	let userTurns = 0;
 	let generating = false;
@@ -107,6 +109,8 @@ export function createMemoryTracker(deps: MemoryDeps): MemoryTracker {
 		evalCtx.addMessage({ role: "user", content: `Conversation so far (earlier portion):\n${transcript}` });
 
 		const res = await summaryLlm.chat({ chatCtx: evalCtx }).collect();
+		// Per-class metering (Phase 4): record this standalone call under "summary".
+		recordUsage(res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
 		const summary = res.text.trim();
 		if (!summary) return;
 		rollingSummary.text = summary;

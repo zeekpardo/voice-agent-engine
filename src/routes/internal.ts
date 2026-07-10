@@ -169,6 +169,12 @@ const Turn = z.object({
 	speaker: z.string().optional(),
 });
 
+const ClassUsage = z.object({
+	tokens_in: z.number().nonnegative(),
+	tokens_out: z.number().nonnegative(),
+	calls: z.number().int().nonnegative(),
+});
+
 const CompleteBody = z.object({
 	status: z.enum(["completed", "failed", "no_answer", "voicemail"]).default("completed"),
 	end_reason: z.string().default("unknown"),
@@ -190,6 +196,17 @@ const CompleteBody = z.object({
 			}),
 		)
 		.default([]),
+	// Per-class LLM usage breakdown (Phase 4). Optional: old workers omit it. The
+	// per-direction tokens sum to the flat llm_tokens_in/out meters; stored as a
+	// JSONB breakdown on those rows so per-class cost is queryable.
+	usage_by_class: z
+		.object({
+			respond: ClassUsage,
+			judge: ClassUsage,
+			summary: ClassUsage,
+			router: ClassUsage,
+		})
+		.optional(),
 });
 
 /**
@@ -239,6 +256,21 @@ internal.post("/calls/:id/complete", async (c) => {
 		});
 	});
 
+	// Per-class breakdown (Phase 4): attach to the llm token rows so each row's
+	// breakdown values (respond/judge/summary/router) sum to that row's quantity.
+	const ubc = body.usage_by_class;
+	const classCalls = ubc
+		? { respond: ubc.respond.calls, judge: ubc.judge.calls, summary: ubc.summary.calls, router: ubc.router.calls }
+		: null;
+	const breakdownFor = (kind: UsageKind): Record<string, unknown> | null => {
+		if (!ubc) return null;
+		if (kind === "llm_tokens_in")
+			return { respond: ubc.respond.tokens_in, judge: ubc.judge.tokens_in, summary: ubc.summary.tokens_in, router: ubc.router.tokens_in, calls: classCalls };
+		if (kind === "llm_tokens_out")
+			return { respond: ubc.respond.tokens_out, judge: ubc.judge.tokens_out, summary: ubc.summary.tokens_out, router: ubc.router.tokens_out, calls: classCalls };
+		return null;
+	};
+
 	for (const u of body.usage) {
 		void recordUsage({
 			apiKeyId: null,
@@ -251,6 +283,7 @@ internal.post("/calls/:id/complete", async (c) => {
 			kind: u.kind as UsageKind,
 			quantity: u.quantity,
 			callId,
+			breakdown: breakdownFor(u.kind as UsageKind),
 		});
 	}
 

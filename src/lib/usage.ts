@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { sql } from "../db/index.js";
+import { jsonb, sql } from "../db/index.js";
 
 /**
  * Metered usage kinds. `http` covers plain request metering (legacy shape);
@@ -25,6 +25,9 @@ export interface UsageEvent {
 	kind?: UsageKind;
 	quantity?: number | null;
 	callId?: string | null;
+	/** Optional per-class JSONB breakdown (Phase 4) — attached to the
+	 * llm_tokens_in/out rows: { respond|judge|summary|router -> tokens+calls }. */
+	breakdown?: Record<string, unknown> | null;
 }
 
 export interface UsageSummaryRow {
@@ -55,11 +58,12 @@ export async function recordUsage(event: UsageEvent): Promise<void> {
 	try {
 		await sql`
 			INSERT INTO usage_events
-				(id, api_key_id, project, endpoint, provider, kind, quantity, call_id, bytes, status, latency_ms)
+				(id, api_key_id, project, endpoint, provider, kind, quantity, call_id, bytes, status, latency_ms, breakdown)
 			VALUES
 				(${randomUUID()}, ${event.apiKeyId}, ${event.project}, ${event.endpoint},
 				 ${event.provider}, ${event.kind ?? "http"}, ${event.quantity ?? null},
-				 ${event.callId ?? null}, ${event.bytes}, ${event.status}, ${event.latencyMs})`;
+				 ${event.callId ?? null}, ${event.bytes}, ${event.status}, ${event.latencyMs},
+				 ${event.breakdown ? jsonb(event.breakdown) : null})`;
 	} catch (err) {
 		console.error("usage record failed", err);
 	}

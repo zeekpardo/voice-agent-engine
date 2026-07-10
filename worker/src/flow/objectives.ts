@@ -77,7 +77,11 @@ export interface ObjectivesDeps {
 		model?: string;
 		temperature?: number;
 		maxTokens?: number;
-	}) => { chat(opts: { chatCtx: llm.ChatContext }): { collect(): Promise<{ text: string }> } };
+	}) => {
+		chat(opts: { chatCtx: llm.ChatContext }): {
+			collect(): Promise<{ text: string; usage?: { promptTokens?: number; completionTokens?: number } }>;
+		};
+	};
 	/** Config-designated field-write tool (config.fieldWriteToolId), or undefined
 	 * when the project registers no such tool. Engine neutrality — no hardcoded
 	 * CRM tool name; a verified objective's value is written through this. */
@@ -94,6 +98,11 @@ export interface ObjectivesDeps {
 	hangUp: (reason: string) => Promise<void>;
 	/** True once call completion has already been reported. */
 	isCompleted: () => boolean;
+	/** Judge model tier (config.models.judge). Sets the DEFAULT judge model; a
+	 * per-node node.judge override still wins. Unset → grok-4-fast (unchanged). */
+	judgeModel?: string;
+	/** Record one judge LLM call's usage (Phase 4 per-class metering). */
+	recordUsage: (tokensIn: number, tokensOut: number) => void;
 }
 
 /** Node-shaped input to `arm` — only the fields the tracker needs. */
@@ -147,14 +156,14 @@ function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promi
 }
 
 export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
-	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, hangUp, isCompleted } =
+	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, hangUp, isCompleted, judgeModel, recordUsage } =
 		deps;
 	// `session` is a LAZY getter on deps (the AgentSession is built after this
 	// factory wires up) — it MUST be read fresh via deps.session at call time.
 	// Destructuring it here would capture `undefined` (the value during wiring)
 	// and every transition would crash on `session.agentState`.
 	const getSession = () => deps.session;
-	const defaultJudgeLlm = buildLlm({ model: "grok-4-fast", temperature: 0, maxTokens: 400 });
+	const defaultJudgeLlm = buildLlm({ model: judgeModel ?? "grok-4-fast", temperature: 0, maxTokens: 400 });
 
 	let activeObjectives: ObjectiveRuntime | null = null;
 
@@ -209,6 +218,9 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 
 		const judgeLlm = rt.judge ? buildLlm({ temperature: 0, maxTokens: 400, ...rt.judge }) : defaultJudgeLlm;
 		const res = await judgeLlm.chat({ chatCtx: evalCtx }).collect();
+		// Per-class metering (Phase 4): the judge is a standalone call the session's
+		// MetricsCollected never sees — read usage straight off the collected response.
+		recordUsage(res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
 		const text = res.text
 			.trim()
 			.replace(/^```(?:json)?\s*/i, "")

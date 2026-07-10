@@ -137,6 +137,62 @@ export interface Turn {
 }
 
 /**
+ * Per-call-class LLM usage (Phase 4). The engine makes four distinct kinds of
+ * model call and they used to be metered together (or not at all): `respond`
+ * (the responder the caller hears — session MetricsCollected), `judge` (the
+ * async objective judge), `summary` (the rolling-memory refresh), and `router`
+ * (a router node's one-shot evaluation). The recorder accumulates tokens+calls
+ * per class so the completion report can carry a per-class breakdown alongside
+ * the legacy total meters.
+ */
+export type UsageClass = "respond" | "judge" | "summary" | "router";
+export interface ClassUsage {
+	tokensIn: number;
+	tokensOut: number;
+	calls: number;
+}
+export const USAGE_CLASSES: readonly UsageClass[] = ["respond", "judge", "summary", "router"];
+export interface UsageRecorder {
+	/** Add one LLM call's usage to its class. Missing token counts default to 0. */
+	record(cls: UsageClass, tokensIn: number, tokensOut: number): void;
+	/** Per-class accumulated usage (live view of the internal map). */
+	byClass(): Record<UsageClass, ClassUsage>;
+	/** Summed tokens across every class (the legacy llm_tokens_in/out meters). */
+	totals(): { tokensIn: number; tokensOut: number };
+}
+
+export function createUsageRecorder(): UsageRecorder {
+	const map: Record<UsageClass, ClassUsage> = {
+		respond: { tokensIn: 0, tokensOut: 0, calls: 0 },
+		judge: { tokensIn: 0, tokensOut: 0, calls: 0 },
+		summary: { tokensIn: 0, tokensOut: 0, calls: 0 },
+		router: { tokensIn: 0, tokensOut: 0, calls: 0 },
+	};
+	return {
+		record(cls, tokensIn, tokensOut) {
+			const c = map[cls];
+			c.tokensIn += tokensIn || 0;
+			c.tokensOut += tokensOut || 0;
+			c.calls += 1;
+		},
+		byClass: () => map,
+		totals: () => ({
+			tokensIn: USAGE_CLASSES.reduce((s, k) => s + map[k].tokensIn, 0),
+			tokensOut: USAGE_CLASSES.reduce((s, k) => s + map[k].tokensOut, 0),
+		}),
+	};
+}
+
+/** Resolved per-class model tiers (config.models). A tier is the DEFAULT model
+ * for that call class; per-node overrides (node.llm / node.judge.model) win. */
+export interface ResolvedModels {
+	respond?: string;
+	judge?: string;
+	summary?: string;
+	router?: string;
+}
+
+/**
  * Mutable runtime slots that flow modules read lazily but session-lifecycle
  * owns and writes. Threaded so the flow wiring can reference the session /
  * hangUp / completion state that only exists after the session is built.
@@ -158,11 +214,11 @@ export interface FlowRuntimeState {
 	 * (Phase 2). Re-armed on every node entry (cleared first) and on teardown, so
 	 * at most one is ever live. */
 	conversationTimer?: ReturnType<typeof setTimeout>;
-	/** Auxiliary LLM usage NOT captured by the session's own MetricsCollected —
-	 * the standalone rolling-summary (and future off-session) calls fold their
-	 * token counts here so session-lifecycle can add them to the completion
-	 * meters (Phase 3 metering). */
-	auxUsage: { llmIn: number; llmOut: number };
+	/** Per-class LLM usage recorder (Phase 4). Every model call — the responder
+	 * (via session MetricsCollected), the objective judge, the rolling-summary
+	 * refresh, and router evaluations — tags its tokens here so the completion
+	 * report carries a per-class breakdown plus the summed legacy total meters. */
+	usage: UsageRecorder;
 }
 
 /** Resolved rolling-memory settings (config.memory with defaults applied). */
@@ -225,6 +281,11 @@ export interface FlowRuntimeContext {
 	buildLlm(over?: { model?: string; temperature?: number; maxTokens?: number }): inference.LLM;
 	defaultLlm: inference.LLM;
 	buildTts: typeof buildTts;
+	/** Per-class usage recorder (Phase 4) — bound to state.usage.record. Router
+	 * evaluations (owned by flow/router.ts, which reads ctx) tag "router" here. */
+	recordUsage(cls: UsageClass, tokensIn: number, tokensOut: number): void;
+	/** Resolved per-class model tiers (config.models + defaults). */
+	models: ResolvedModels;
 
 	// prompt fragments assembled once, inherited by every node
 	globalInstructions: string;
