@@ -15,6 +15,7 @@ import {
 	inferenceModel,
 	interpolate,
 	interpolateSpoken,
+	nodeResultVarName,
 } from "./context.js";
 import type { Handoff } from "./handoff.js";
 import { createMemoryTracker } from "./memory.js";
@@ -242,6 +243,33 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 	const resolveToolDef = (toolId: string | undefined, fallback: typeof fieldWriteDef) =>
 		findToolDef(bundle.tools, toolId) ?? fallback;
 
+	// Node-result variables (CloseBot "Nodes" Tier 1). Every node that becomes an
+	// agent (kind "agent" — plain agent, objective, and conversation nodes) exposes
+	// its outcome as {{node_<id>_result|attempts|succeeded}}. Pre-seed all of them to
+	// "" so a FORWARD reference (a node reading a node that hasn't run yet)
+	// interpolates to empty instead of leaving a raw {{token}} in the text — and so
+	// they aren't flagged as MISSING CONTEXT. Values fill in as nodes complete.
+	const nodeEntryTurns = new Map<string, number>();
+	const userTurnCount = () => turns.filter((t) => t.role === "user").length;
+	for (const n of flow.nodes) {
+		if ((n.kind ?? "agent") !== "agent") continue;
+		variables[nodeResultVarName(n.id, "result")] ??= "";
+		variables[nodeResultVarName(n.id, "attempts")] ??= "";
+		variables[nodeResultVarName(n.id, "succeeded")] ??= "";
+	}
+	const markNodeEntry = (nodeId: string) => {
+		nodeEntryTurns.set(nodeId, userTurnCount());
+	};
+	const recordNodeResult = (nodeId: string, fields: { result?: string; succeeded?: boolean }) => {
+		if (fields.result !== undefined) variables[nodeResultVarName(nodeId, "result")] = fields.result;
+		if (fields.succeeded !== undefined) {
+			variables[nodeResultVarName(nodeId, "succeeded")] = fields.succeeded ? "true" : "false";
+		}
+		const base = nodeEntryTurns.get(nodeId);
+		const attempts = base === undefined ? userTurnCount() : Math.max(0, userTurnCount() - base);
+		variables[nodeResultVarName(nodeId, "attempts")] = String(attempts);
+	};
+
 	const flowCtx: FlowRuntimeContext = {
 		job: ctx,
 		dispatch,
@@ -264,6 +292,8 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		state,
 		interpolate: (t: string) => interpolate(t, variables),
 		interpolateSpoken: (t: string) => interpolateSpoken(t, variables),
+		markNodeEntry,
+		recordNodeResult,
 		buildLlm,
 		defaultLlm,
 		buildTts,
@@ -323,6 +353,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		},
 		judgeModel: models.judge,
 		recordUsage: (inTok, outTok) => state.usage.record("judge", inTok, outTok),
+		recordNodeResult,
 	});
 	const objectiveUserTurnHook = () => objectivesTracker.onUserTurn();
 

@@ -137,6 +137,10 @@ export interface ObjectivesDeps {
 	judgeModel?: string;
 	/** Record one judge LLM call's usage (Phase 4 per-class metering). */
 	recordUsage: (tokensIn: number, tokensOut: number) => void;
+	/** Publish this node's outcome as {{node_<id>_result|attempts|succeeded}}
+	 * interpolation variables (CloseBot "Nodes" Tier 1) once its objectives complete.
+	 * result = captured answer(s); succeeded = every required objective met (no skip). */
+	recordNodeResult: (nodeId: string, fields: { result?: string; succeeded?: boolean }) => void;
 }
 
 /** Node-shaped input to `arm` — only the fields the tracker needs. */
@@ -214,7 +218,7 @@ function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promi
 }
 
 export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
-	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, startHandoff, hangUp, isCompleted, setTransitionPending, judgeModel, recordUsage } =
+	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, startHandoff, hangUp, isCompleted, setTransitionPending, judgeModel, recordUsage, recordNodeResult } =
 		deps;
 	// `session` is a LAZY getter on deps (the AgentSession is built after this
 	// factory wires up) — it MUST be read fresh via deps.session at call time.
@@ -539,6 +543,17 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			writeObjectiveField(o, p.answer, p);
 		}
 		rt.transitioning = true;
+		// Publish this node's outcome as {{node_<id>_result|attempts|succeeded}}
+		// (CloseBot "Nodes" Tier 1) BEFORE the async transition below, so the next
+		// node's prompt build (which happens after the idle-wait) already resolves it.
+		// result = every captured, non-"N/A" objective answer joined; succeeded =
+		// no required objective was skipped (maxAttempts-exhausted); attempts =
+		// caller-turn delta since node entry (computed inside recordNodeResult).
+		const answers = rt.objectives
+			.map((o) => (rt.state.get(o.key)?.answer ?? "").trim())
+			.filter((a) => a && a.toUpperCase() !== "N/A");
+		const anySkipped = rt.objectives.some((o) => (o.required ?? true) && rt.state.get(o.key)?.skipped);
+		recordNodeResult(rt.nodeId, { result: answers.join(", "), succeeded: !anySkipped });
 		// Commit the transition NOW (before the idle-wait below, which can take
 		// seconds): a model that emits end_call in this window would otherwise pass
 		// the lastTransitionAt guard (the current node was entered long ago) and kill
