@@ -308,6 +308,7 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				ctx.pacingRules +
 				ctx.languageRules +
 				ctx.textRules +
+				ctx.responseStyle +
 				(ctx.endCallEnabled
 					? "\n\nOnly the end_call tool ends the call — moving between stages never ends it. Use end_call solely when the conversation is truly over and you've said goodbye."
 					: "") +

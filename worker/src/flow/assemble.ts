@@ -140,9 +140,23 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		missingVars.size > 0
 			? `\n\n## MISSING CONTEXT\nThese context values were NOT provided for this call: ${[...missingVars].join(", ")}. Their {{placeholders}} may appear in your notes — NEVER say a placeholder token aloud. Speak naturally without the value, and if you genuinely need it (like the caller's name or their property address), simply ask the caller.`
 			: "";
+	// Per-agent phrasing/tone directive (distinct from persona identity): when set,
+	// it rides on EVERY generated message so replies stay varied and natural.
+	// Empty/unset → inject nothing, so existing agents talk exactly as before.
+	const responseStyle =
+		(config.responseStyle ?? "").trim().length > 0
+			? `\n\n## RESPONSE STYLE\n${config.responseStyle!.trim()}`
+			: "";
 
 	const instructions =
-		globalInstructions + pacingRules + languageRules + textRules + endCallGuidance + missingNote + prohibited;
+		globalInstructions +
+		pacingRules +
+		languageRules +
+		textRules +
+		responseStyle +
+		endCallGuidance +
+		missingNote +
+		prohibited;
 
 	const endCallTool = llm.tool({
 		description:
@@ -259,6 +273,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		pacingRules,
 		languageRules,
 		textRules,
+		responseStyle,
 		missingNote,
 		prohibited,
 		fieldWriteDef,
