@@ -208,6 +208,11 @@ export interface FlowRuntimeState {
 	/** True while a simulated warm transfer (announcement + hold music) plays;
 	 * the SpeechCreated guard discards any LLM speech while set. */
 	transferInFlight: boolean;
+	/** Stamped by buildFlowAgent on every node→node swap (and by the transfer /
+	 * handoff sequences). The end_call tool refuses to fire within a short window
+	 * of this — a model that emits end_call IN THE SAME TURN as an exit tool
+	 * (parallel tool calls) would otherwise kill the call mid-transition. */
+	lastTransitionAt?: number;
 	/** Post-transfer voice: applied to every agent built after the switch. */
 	ttsOverride?: TtsInstance;
 	/** Soft per-node wrap-up timer for a conversation node's maxDurationSeconds

@@ -492,7 +492,18 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 		if (endReason === "unknown") endReason = reason;
 		await complete().catch((err) => console.error("pre-hangup flush failed", err));
 		await session.close().catch((err) => console.error("session close failed", err));
-		await ctx.deleteRoom().catch(() => {});
+		// The room delete is what disconnects the SIP leg — a swallowed failure
+		// here leaves the caller on a silent open line while the engine reports
+		// the call completed. Log loudly and retry once before giving up.
+		try {
+			await ctx.deleteRoom();
+		} catch (err) {
+			console.error("room delete failed — SIP leg may linger; retrying once", err);
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+			await ctx
+				.deleteRoom()
+				.catch((err2) => console.error("room delete retry failed — caller line may stay open", err2));
+		}
 	};
 
 	session.on(voice.AgentSessionEventTypes.Close, (ev) => {

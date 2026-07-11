@@ -53,6 +53,9 @@ export function createHandoff(shared: AssembleShared): Handoff {
 		// One handoff at a time; a duplicated exit invocation is a no-op.
 		if (inFlight) return;
 		inFlight = true;
+		// Covers the single-agent target path too (flow targets re-stamp via
+		// buildFlowAgent) — see FlowRuntimeState.lastTransitionAt.
+		shared.state.lastTransitionAt = Date.now();
 
 		// Loop protection: a graph that keeps handing off (A→B→A→…) can't wedge a
 		// call. On the cap we end gracefully rather than continue under a runaway.

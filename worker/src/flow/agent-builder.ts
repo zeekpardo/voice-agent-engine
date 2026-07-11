@@ -87,6 +87,10 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 	};
 
 	const buildFlowAgent = (nodeId: string, chatCtx?: llm.ChatContext): voice.Agent => {
+		// Stamp every node→node swap: end_call refuses to fire near a transition,
+		// so a model emitting end_call in the SAME turn as an exit tool (parallel
+		// tool calls) can't kill the call mid-swap.
+		ctx.state.lastTransitionAt = Date.now();
 		const node = nodesById.get(nodeId);
 		if (!node) throw new Error(`flow node "${nodeId}" not found`);
 		if (
