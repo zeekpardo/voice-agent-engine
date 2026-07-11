@@ -665,6 +665,14 @@ export const AgentConfig = z.object({
 			 * round-trips through save/publish without being stripped.
 			 */
 			summaryField: z.string().nullish(),
+			/**
+			 * Whether the consuming SaaS posts a timeline note (summary + captured
+			 * values) to the CRM contact after the call. Like `summaryField`, the
+			 * ENGINE never reads this — it's a SaaS-side sync flag that rides on the
+			 * config so it round-trips through save/publish. Optional: when absent the
+			 * SaaS falls back to its own per-source default.
+			 */
+			writeNote: z.boolean().optional(),
 		})
 		.default({}),
 
