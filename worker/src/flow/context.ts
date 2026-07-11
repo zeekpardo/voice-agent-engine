@@ -314,6 +314,8 @@ export interface FlowRuntimeContext {
 	// prompt fragments assembled once, inherited by every node
 	globalInstructions: string;
 	pacingRules: string;
+	/** Voice-only "reply in the caller's current language" rule (empty on text). */
+	languageRules: string;
 	missingNote: string;
 	prohibited: string;
 

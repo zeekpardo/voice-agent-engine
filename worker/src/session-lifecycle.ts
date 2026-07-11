@@ -1,10 +1,11 @@
-import { type JobContext, inference, voice } from "@livekit/agents";
+import { type JobContext, asLanguageCode, inference, voice } from "@livekit/agents";
 import {
 	BackgroundVoiceCancellation,
 	TelephonyBackgroundVoiceCancellation,
 } from "@livekit/noise-cancellation-node";
 import { type FlowRuntimeState, type Turn, buildTts, inferenceModel } from "./flow/context.js";
 import { type AgentConfig, type DispatchMetadata, reportCompletion, reportEvent } from "./gateway.js";
+import { createLanguageAligner } from "./language.js";
 
 /**
  * Session setup + teardown, shared by the flow and single-agent paths. Owns
@@ -184,22 +185,29 @@ interface ChannelRuntime {
  * its go-live SIP-answer wait, and TTS-drives-egress (so emitAgentTurn is a
  * no-op). Preserved byte-for-byte from the pre-Phase-6 startSession.
  */
-function buildVoiceChannel(ctx: JobContext, config: AgentConfig, isInbound: boolean): ChannelRuntime {
+function buildVoiceChannel(
+	ctx: JobContext,
+	config: AgentConfig,
+	isInbound: boolean,
+	dispatch: DispatchMetadata,
+): ChannelRuntime {
 	const sttModel = inferenceModel(config.stt.model, config.stt.provider, "xai/stt-1");
+	// xAI STT auto-detects (and code-switches) languages mid-call; pinning
+	// it to the agent's language forces monolingual decoding — Spanish
+	// callers got slow/empty finals. Only language-scoped providers
+	// (Deepgram, AssemblyAI, …) receive the hint.
+	const sttIsXai = sttModel.startsWith("xai/");
+	const stt = new inference.STT({
+		model: sttModel,
+		...(sttIsXai ? {} : { language: config.language }),
+	});
 	// vad mode is a REAL mode in @livekit/agents ≥1.5.0: AgentSession auto-
 	// provisions a bundled inference.VAD (Silero, via the Inference gateway). We
 	// pass it explicitly so the wiring is self-documenting and not reliant on the
 	// auto-provision behavior. semantic mode keeps the cloud end-of-turn model.
 	const useVad = config.turnDetection.mode === "vad";
 	const session = new voice.AgentSession({
-		// xAI STT auto-detects (and code-switches) languages mid-call; pinning
-		// it to the agent's language forces monolingual decoding — Spanish
-		// callers got slow/empty finals. Only language-scoped providers
-		// (Deepgram, AssemblyAI, …) receive the hint.
-		stt: new inference.STT({
-			model: sttModel,
-			...(sttModel.startsWith("xai/") ? {} : { language: config.language }),
-		}),
+		stt,
 		tts: buildTts(config.tts),
 		...(useVad ? { vad: new inference.VAD() } : {}),
 		turnHandling: {
@@ -227,6 +235,24 @@ function buildVoiceChannel(ctx: JobContext, config: AgentConfig, isInbound: bool
 			// finishing their sentence; discard if the final transcript differs.
 			preemptiveGeneration: { enabled: config.turnDetection.preemptiveGeneration !== false },
 		},
+	});
+
+	// Mid-call language alignment: follow the CALLER's language, debounced per
+	// final transcript (two consecutive confident detections before switching).
+	// Language-scoped STT providers get their hint updated in place —
+	// stt.updateOptions propagates to the live stream, no session recreation.
+	// xAI STT stays unhinted (auto-detects / code-switches; see above). The LLM
+	// side is covered by the unconditional language rule assemble.ts injects
+	// into every voice agent's instructions; our TTS options pin no language.
+	const aligner = createLanguageAligner({
+		callId: dispatch.callId,
+		initialLanguage: config.language,
+		apply: (hint) => {
+			if (!sttIsXai) stt.updateOptions({ language: asLanguageCode(hint) });
+		},
+	});
+	session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (ev) => {
+		if (ev.isFinal) aligner.onFinalTranscript(ev.transcript, ev.language);
 	});
 
 	// Subtle thinking sound (SDK-native, driven by the agent-state machine) so a
@@ -352,8 +378,11 @@ function buildChannel(
 	ctx: JobContext,
 	config: AgentConfig,
 	isInbound: boolean,
+	dispatch: DispatchMetadata,
 ): ChannelRuntime {
-	return channel === "text" ? buildTextChannel(ctx, config) : buildVoiceChannel(ctx, config, isInbound);
+	return channel === "text"
+		? buildTextChannel(ctx, config)
+		: buildVoiceChannel(ctx, config, isInbound, dispatch);
 }
 
 export interface SessionLifecycleDeps {
@@ -382,7 +411,7 @@ const DEFAULT_DISCLOSURE = "Just so you know, you're speaking with an A.I. assis
 export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	const { job: ctx, config, dispatch, turns, state, agent, greeting } = deps;
 
-	const channel = buildChannel(deps.channel, ctx, config, deps.isInbound);
+	const channel = buildChannel(deps.channel, ctx, config, deps.isInbound, dispatch);
 	const { session } = channel;
 	// Publish the session so the flow modules' lazy ctx.session getter resolves.
 	state.session = session;
