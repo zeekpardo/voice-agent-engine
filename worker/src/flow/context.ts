@@ -213,6 +213,21 @@ export interface FlowRuntimeState {
 	 * of this — a model that emits end_call IN THE SAME TURN as an exit tool
 	 * (parallel tool calls) would otherwise kill the call mid-transition. */
 	lastTransitionAt?: number;
+	/** True from the moment an exit to a REAL next node is COMMITTED (model exit
+	 * tool executing, or the objectives judge deciding to advance) until that next
+	 * node actually enters. The lastTransitionAt 5s window only covers the tail
+	 * AFTER a swap; it does NOT cover the objectives path, where seconds can pass
+	 * between "objectives met" and the new node entering (waitForAgentIdle). end_call
+	 * also refuses while this is set, so a model that emits end_call in the same turn
+	 * as an exit — or during the judge's idle-wait — can't kill the call mid-transition.
+	 * Cleared once the next node enters (buildFlowAgent onEnter) or the transition aborts. */
+	transitionPending: boolean;
+	/** Whether the CURRENT flow node is terminal (no regular exit routes onward to a
+	 * next node). Published by buildFlowAgent onEnter; read by the shared end_call
+	 * tool, which refuses to hang up on a NON-terminal node so the model can't close
+	 * the call while stages remain — it must take the forward exit instead. Defaults
+	 * true (a single-agent, no-flow config is inherently terminal). */
+	currentNodeTerminal: boolean;
 	/** Post-transfer voice: applied to every agent built after the switch. */
 	ttsOverride?: TtsInstance;
 	/** Soft per-node wrap-up timer for a conversation node's maxDurationSeconds
@@ -316,6 +331,9 @@ export interface FlowRuntimeContext {
 	pacingRules: string;
 	/** Voice-only "reply in the caller's current language" rule (empty on text). */
 	languageRules: string;
+	/** Text-only "don't read back typed values character by character" rule (empty
+	 * on voice, where read-back confirmation of critical fields is correct). */
+	textRules: string;
 	missingNote: string;
 	prohibited: string;
 
