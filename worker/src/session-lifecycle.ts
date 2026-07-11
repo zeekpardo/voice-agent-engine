@@ -3,6 +3,7 @@ import {
 	BackgroundVoiceCancellation,
 	TelephonyBackgroundVoiceCancellation,
 } from "@livekit/noise-cancellation-node";
+import { reportAiTurn } from "./ai-log.js";
 import { type FlowRuntimeState, type Turn, buildTts, inferenceModel } from "./flow/context.js";
 import { type AgentConfig, type DispatchMetadata, reportCompletion, reportEvent } from "./gateway.js";
 import { createLanguageAligner } from "./language.js";
@@ -431,6 +432,16 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 		}
 	});
 
+	// Responder ai.turn pairing state (AI-logs panel): llm_metrics for a reply
+	// arrive before the reply commits as a ConversationItemAdded, so metrics are
+	// queued here and consumed by the item handler.
+	const respondMetricsQueue: { promptTokens: number; completionTokens: number }[] = [];
+	const respondModel = inferenceModel(
+		config.models?.respond ?? config.llm.model,
+		"xai",
+		"xai/grok-4-fast",
+	);
+
 	// 4. Collect transcript turns + usage meters as the session runs. Channel-
 	// agnostic: ConversationItemAdded fires whether the turn arrived by STT or a
 	// text stream, and whether the reply left as TTS audio or a text stream.
@@ -443,6 +454,26 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 		// on voice, where TTS already spoke it). The greeting/disclosure ride the
 		// same path (session.say emits a ConversationItemAdded too).
 		if (role === "agent" && text) channel.emitAgentTurn(text);
+		// AI-logs panel: pair each committed LLM reply with its collected metrics
+		// (queued below in MetricsCollected — the stream finishes before the item
+		// commits). say()-driven items (greeting/statements) have no metrics queued
+		// and are skipped. The session drives the responder internally, so the full
+		// request isn't capturable here — the row carries model/tokens/response.
+		if (role === "agent" && text) {
+			const m = respondMetricsQueue.shift();
+			if (m) {
+				reportAiTurn(dispatch.callId, {
+					class: "respond",
+					title: "Agent response",
+					model: respondModel,
+					promptTokens: m.promptTokens,
+					completionTokens: m.completionTokens,
+					request: null,
+					response: text,
+					extra: { node: session.currentAgent?.id ?? null },
+				});
+			}
+		}
 		// Judge objectives off the hot path: fires AFTER the turn is recorded
 		// so the judge always sees the caller's latest words. Async — never
 		// delays the reply that's already generating. Read fresh off state.turnHooks
@@ -461,6 +492,10 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 			// summary and router calls are standalone and meter themselves off their
 			// collected responses (Phase 4). So every session llm_metrics is "respond".
 			state.usage.record("respond", m.promptTokens, m.completionTokens);
+			// Queue for the ConversationItemAdded pairing above (ai.turn logging).
+			// Cap the queue so interrupted/discarded generations can't grow it.
+			respondMetricsQueue.push({ promptTokens: m.promptTokens, completionTokens: m.completionTokens });
+			if (respondMetricsQueue.length > 4) respondMetricsQueue.shift();
 		} else if (m.type === "tts_metrics") {
 			usage.ttsChars += m.charactersCount;
 		} else if (m.type === "stt_metrics") {

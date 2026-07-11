@@ -1,5 +1,6 @@
 import { llm } from "@livekit/agents";
 import type { JSONSchema7 } from "json-schema";
+import { capJson } from "./ai-log.js";
 import type { DispatchMetadata, ToolDef } from "./gateway.js";
 import { reportEvent } from "./gateway.js";
 // Vendored copy of the canonical HMAC scheme (packages/shared/src/hmac.ts).
@@ -48,7 +49,11 @@ export async function invokeTool(
 		});
 		if (!res.ok) throw new Error(`tool endpoint returned ${res.status}`);
 		const data = (await res.json()) as { result?: unknown };
-		return (data.result ?? data) as JSONValue;
+		const result = (data.result ?? data) as JSONValue;
+		// AI-logs panel: the tool's outcome (tool.invoked above carries the args).
+		// Serialized + capped so a fat webhook response can't bloat call_events.
+		reportEvent(dispatch.callId, "tool.result", { tool: t.name, ok: true, result: capJson(result) });
+		return result;
 	} catch (err) {
 		reportEvent(dispatch.callId, "tool.failed", {
 			tool: t.name,

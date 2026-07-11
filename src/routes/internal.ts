@@ -177,19 +177,25 @@ internal.post("/calls/:id/events", async (c) => {
 			WHERE id = ${callId}`;
 	}
 
+	// Verbose diagnostic events (AI-logs panel: full prompts/completions, tool
+	// results) are stored for the call trace but NOT fanned out over webhooks —
+	// they're large and would leak prompt internals to webhook consumers.
+	const diagnosticOnly = type.startsWith("ai.") || type === "tool.result";
 	await logCallEvent(
 		sql,
 		{ callId, type, payload },
-		{
-			project: call.project as string,
-			event: {
-				type,
-				call_id: callId,
-				agent_id: call.agent_id as string,
-				metadata: call.metadata,
-				...payload,
-			},
-		},
+		diagnosticOnly
+			? undefined
+			: {
+					project: call.project as string,
+					event: {
+						type,
+						call_id: callId,
+						agent_id: call.agent_id as string,
+						metadata: call.metadata,
+						...payload,
+					},
+				},
 	);
 	return c.json({ ok: true });
 });

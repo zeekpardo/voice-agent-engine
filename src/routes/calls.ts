@@ -150,10 +150,49 @@ calls.get("/calls/:id/events", async (c) => {
 	const key = c.get("apiKey");
 	const call = await getCall(key.project, c.req.param("id"));
 	if (!call) throw notFound();
+	// Bounded: ai.turn events carry prompt/completion payloads, so an unbounded
+	// read of a long call could be several MB. Chronological; the newest rows
+	// win when the cap bites (they're the ones the AI-logs panel shows first).
+	const limit = Math.min(Number(c.req.query("limit") ?? 500) || 500, 2000);
 	const rows = await sql`
 		SELECT type, payload, created_at FROM call_events
-		WHERE call_id = ${call.id as string} ORDER BY created_at`;
-	return c.json({ call_id: call.id, events: rows });
+		WHERE call_id = ${call.id as string}
+		ORDER BY created_at DESC LIMIT ${limit}`;
+	return c.json({ call_id: call.id, events: rows.reverse() });
+});
+
+const AppendEventsBody = z.object({
+	events: z
+		.array(
+			z.object({
+				type: z.string().regex(/^[a-z][a-z0-9_.]{1,63}$/, "lowercase dotted event type"),
+				payload: z.record(z.unknown()).default({}),
+			}),
+		)
+		.min(1)
+		.max(20),
+});
+
+/**
+ * Append diagnostic events to a call's trace — how the consuming app attaches
+ * its OWN side of the story (e.g. the CRM HTTP request/response behind a tool
+ * invocation) to the same call_events timeline the worker writes. Store-only:
+ * never fanned out over webhooks (these are verbose diagnostics, not lifecycle
+ * moments), and each payload is size-capped.
+ */
+calls.post("/calls/:id/events", async (c) => {
+	const key = c.get("apiKey");
+	const call = await getCall(key.project, c.req.param("id"));
+	if (!call) throw notFound();
+
+	const body = await parseBody(c, AppendEventsBody, () => "Body must be { events: [{ type, payload? }] }");
+	for (const ev of body.events) {
+		if (JSON.stringify(ev.payload).length > 64_000) {
+			throw new AppError(400, "payload_too_large", `Event payload for "${ev.type}" exceeds 64KB`);
+		}
+		await logCallEvent(sql, { callId: call.id as string, type: ev.type, payload: ev.payload });
+	}
+	return c.json({ ok: true, appended: body.events.length });
 });
 
 calls.post("/calls/:id/cancel", async (c) => {
