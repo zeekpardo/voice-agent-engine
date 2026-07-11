@@ -49,8 +49,15 @@ numbers.post("/numbers", async (c) => {
 
 numbers.get("/numbers", async (c) => {
 	const key = c.get("apiKey");
+	// LEFT JOIN the routed agent so the list is self-describing: callers get the
+	// assigned agent's name without a second lookup, and a number routed to an
+	// agent the caller can't otherwise see still renders a name.
 	const rows = await sql`
-		SELECT * FROM phone_numbers WHERE project = ${key.project} ORDER BY created_at DESC`;
+		SELECT n.*, a.name AS inbound_agent_name
+		FROM phone_numbers n
+		LEFT JOIN agents a ON a.id = n.inbound_agent_id
+		WHERE n.project = ${key.project}
+		ORDER BY n.created_at DESC`;
 	return c.json({ numbers: rows });
 });
 
@@ -68,7 +75,11 @@ numbers.patch("/numbers/:id", async (c) => {
 	await sql`
 		UPDATE phone_numbers SET inbound_agent_id = ${body.inbound_agent_id ?? null}
 		WHERE id = ${c.req.param("id")}`;
-	const updated = await sql`SELECT * FROM phone_numbers WHERE id = ${c.req.param("id")}`;
+	const updated = await sql`
+		SELECT n.*, a.name AS inbound_agent_name
+		FROM phone_numbers n
+		LEFT JOIN agents a ON a.id = n.inbound_agent_id
+		WHERE n.id = ${c.req.param("id")}`;
 	return c.json(updated[0]);
 });
 
