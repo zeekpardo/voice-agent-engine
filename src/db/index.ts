@@ -299,6 +299,39 @@ const MIGRATIONS: { version: number; name: string; up: string }[] = [
 			ON conversation_events(conversation_id, created_at);
 		`,
 	},
+	{
+		version: 10,
+		name: "concurrency-limits",
+		// Per-tenant concurrent-call caps (multi-account plan §2). One row per
+		// (project, scope, ref): scope is 'project' | 'agent' | 'group', ref is ''
+		// for project scope and the agent id / opaque group_ref otherwise. Absence
+		// of a row = unlimited for that scope (project falls back to the
+		// DEFAULT_MAX_CONCURRENT_CALLS env). `queued_reason` on calls distinguishes
+		// a capacity-parked outbound ('capacity') from an ordinary about-to-dial
+		// 'queued' row, so the drainer only ever touches its own parked calls.
+		//
+		// Indexes:
+		//   - idx_calls_active_scope (project, agent_id, group_ref) WHERE status IN
+		//     ('dialing','active'): the limiter's live-count query scans project-
+		//     equality + FILTERs on agent_id/group_ref over only in-flight rows.
+		//   - idx_calls_queued_capacity (created_at) WHERE queued+capacity: the
+		//     drainer picks oldest-first and expires stale rows off this partial set.
+		up: `
+		CREATE TABLE IF NOT EXISTS concurrency_limits (
+			project        TEXT NOT NULL,
+			scope          TEXT NOT NULL,              -- project | agent | group
+			ref            TEXT NOT NULL DEFAULT '',   -- '' for project; agent id / group_ref otherwise
+			max_concurrent INTEGER NOT NULL,
+			updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+			UNIQUE (project, scope, ref)
+		);
+		ALTER TABLE calls ADD COLUMN IF NOT EXISTS queued_reason TEXT;
+		CREATE INDEX IF NOT EXISTS idx_calls_active_scope
+			ON calls(project, agent_id, group_ref) WHERE status IN ('dialing', 'active');
+		CREATE INDEX IF NOT EXISTS idx_calls_queued_capacity
+			ON calls(created_at) WHERE status = 'queued' AND queued_reason = 'capacity';
+		`,
+	},
 ];
 
 /** Apply pending migrations on boot. */

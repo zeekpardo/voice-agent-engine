@@ -2,12 +2,13 @@ import { serve } from "@hono/node-server";
 import { app } from "./app.js";
 import { migrate } from "./db/index.js";
 import { env } from "./env.js";
-import { startCallScheduler } from "./lib/outbound.js";
+import { startCallQueueDrainer, startCallScheduler } from "./lib/outbound.js";
 import { startWebhookDispatcher } from "./lib/webhooks.js";
 
 await migrate();
 startWebhookDispatcher();
 startCallScheduler();
+startCallQueueDrainer();
 
 serve({ fetch: app.fetch, port: env.PORT }, (info) => {
 	console.log(`🎙️  voice-agent-engine listening on http://localhost:${info.port}`);

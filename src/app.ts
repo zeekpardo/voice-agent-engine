@@ -10,6 +10,7 @@ import { calls } from "./routes/calls.js";
 import { conversations } from "./routes/conversations.js";
 import { health } from "./routes/health.js";
 import { internal } from "./routes/internal.js";
+import { limits } from "./routes/limits.js";
 import { numbers } from "./routes/numbers.js";
 import { sessions } from "./routes/sessions.js";
 import { tools } from "./routes/tools.js";
@@ -47,6 +48,7 @@ v1.route("/", conversations);
 v1.route("/", webhooks);
 v1.route("/", numbers);
 v1.route("/", usage);
+v1.route("/", limits);
 app.route("/v1", v1);
 
 // Consistent error envelope.

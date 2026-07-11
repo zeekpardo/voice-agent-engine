@@ -146,12 +146,24 @@ export async function reportCompletion(callId: string, report: CompletionReport)
 	}
 }
 
+/**
+ * Gateway's answer when an inbound call is refused for lack of capacity (per-
+ * tenant concurrency limiting): no agent bundle, no call row — the worker should
+ * end the call gracefully. Distinguished from a resolved call by the `rejected` tag.
+ */
+export interface InboundRejected {
+	rejected: "capacity";
+	blockedBy?: "project" | "agent" | "group";
+	current: number;
+	limit: number | null;
+}
+
 /** Inbound SIP call: resolve which agent answers this number + create the call row. */
 export async function resolveInbound(input: {
 	to_number: string;
 	from_number: string;
 	room_name: string;
-}): Promise<{ call_id: string } & AgentBundle> {
+}): Promise<({ call_id: string } & AgentBundle) | InboundRejected> {
 	const res = await gatewayFetch("/internal/calls/inbound", {
 		method: "POST",
 		body: JSON.stringify(input),
@@ -159,5 +171,5 @@ export async function resolveInbound(input: {
 	if (!res.ok) {
 		throw new Error(`inbound resolution failed (${res.status}): ${await res.text()}`);
 	}
-	return (await res.json()) as { call_id: string } & AgentBundle;
+	return (await res.json()) as ({ call_id: string } & AgentBundle) | InboundRejected;
 }

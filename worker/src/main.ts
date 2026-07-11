@@ -60,6 +60,15 @@ export default defineAgent({
 				from_number: fromNumber,
 				room_name: ctx.room.name ?? "",
 			});
+			// Concurrency cap reached (multi-account plan §2): the gateway created no
+			// call and no bundle. End the call gracefully — leaving the room lets
+			// LiveKit tear it down (the SaaS reacts to the call.rejected_capacity event).
+			if ("rejected" in resolved) {
+				console.warn(
+					`agent-worker: inbound rejected (${resolved.rejected}, blockedBy=${resolved.blockedBy}); ending call`,
+				);
+				return;
+			}
 			bundle = resolved;
 			dispatch = {
 				projectId: resolved.agent.project,

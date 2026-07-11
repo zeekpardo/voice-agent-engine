@@ -4,6 +4,7 @@ import type { AppEnv } from "../app-types.js";
 import { sql } from "../db/index.js";
 import { env } from "../env.js";
 import { logCallEvent } from "../lib/call-events.js";
+import { checkCapacity } from "../lib/concurrency.js";
 import { badRequest, unauthorized } from "../lib/errors.js";
 import { parseBody } from "../lib/http.js";
 import { newId } from "../lib/id.js";
@@ -96,6 +97,34 @@ internal.post("/calls/inbound", async (c) => {
 		SELECT * FROM phone_numbers WHERE e164 = ANY(${candidates}) AND inbound_agent_id IS NOT NULL`;
 	const number = nums[0];
 	if (!number) throw badRequest(`No agent is routed to ${to_number}`);
+
+	// Concurrency cap (multi-account plan §2). Checked BEFORE building the bundle or
+	// creating a call row: an inbound call at capacity is rejected with a distinct
+	// response the worker understands (it ends the room gracefully). No call row is
+	// created, so the rejection is reported as a project-level event, not a call one.
+	const capacity = await checkCapacity({
+		project: number.project as string,
+		agentId: number.inbound_agent_id as string,
+		groupRef: (number.group_ref as string | null) ?? null,
+	});
+	if (!capacity.allowed) {
+		void emitEvent(number.project as string, {
+			type: "call.rejected_capacity",
+			agent_id: number.inbound_agent_id as string,
+			direction: "inbound",
+			from_number,
+			to_number,
+			blocked_by: capacity.blockedBy,
+			current: capacity.current,
+			limit: capacity.limit,
+		});
+		return c.json({
+			rejected: "capacity",
+			blockedBy: capacity.blockedBy,
+			current: capacity.current,
+			limit: capacity.limit,
+		});
+	}
 
 	const bundle = await buildAgentBundle(number.inbound_agent_id as string);
 

@@ -37,6 +37,13 @@ const schema = z.object({
 	// Defaults for the LLM (/v1/chat) and TTS (/v1/speak) proxies.
 	CHAT_DEFAULT_MODEL: z.string().default("grok-4-fast"),
 	TTS_DEFAULT_VOICE: z.string().default("ara"),
+	// Per-tenant concurrency limiting (multi-account plan §2). The project-scope
+	// default applied when no concurrency_limits row overrides it; unset = the
+	// project is unlimited (per-agent/group are always unlimited without a row).
+	DEFAULT_MAX_CONCURRENT_CALLS: z.coerce.number().int().positive().optional(),
+	// How long an outbound call may sit queued at capacity before it is canceled
+	// with end_reason 'queue_expired'. Default 30 min.
+	QUEUE_EXPIRY_SECONDS: z.coerce.number().int().positive().default(1800),
 	// Call recording destination (LiveKit Egress → S3-compatible storage). All
 	// optional: when an agent enables recording but these are unset, the gateway
 	// logs a warning and skips egress — it NEVER fails the call. S3_ENDPOINT is
