@@ -1,5 +1,6 @@
 import { llm } from "@livekit/agents";
 import { z } from "zod";
+import { chatCtxMessages, reportAiTurn } from "../ai-log.js";
 import { reportEvent } from "../gateway.js";
 import { invokeTool } from "../tools.js";
 import { type FlowRuntimeContext, tagRulesSatisfied, upsertContactState } from "./context.js";
@@ -264,6 +265,17 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 				try {
 					const res = await evalLlm.chat({ chatCtx: evalCtx }).collect();
 					ctx.recordUsage("router", res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
+					// AI-logs panel: full request/response for the router pick (capped).
+					reportAiTurn(dispatch.callId, {
+						class: "router",
+						title: `Routing — ${node.name ?? node.id}`,
+						model: evalLlm.model,
+						promptTokens: res.usage?.promptTokens ?? 0,
+						completionTokens: res.usage?.completionTokens ?? 0,
+						request: chatCtxMessages(evalCtx),
+						response: res.text,
+						extra: { node: node.id, attempt: attempt + 1 },
+					});
 					decision = res.text.trim();
 					const validated = decisionSchema.safeParse(decision);
 					if (validated.success) {

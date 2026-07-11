@@ -1,4 +1,5 @@
 import { type inference, llm, voice } from "@livekit/agents";
+import { chatCtxMessages, reportAiTurn } from "../ai-log.js";
 import { type DispatchMetadata, reportEvent } from "../gateway.js";
 import { compactChatContext, type ResolvedMemory, type Turn } from "./context.js";
 
@@ -111,6 +112,16 @@ export function createMemoryTracker(deps: MemoryDeps): MemoryTracker {
 		const res = await summaryLlm.chat({ chatCtx: evalCtx }).collect();
 		// Per-class metering (Phase 4): record this standalone call under "summary".
 		recordUsage(res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
+		// AI-logs panel: full request/response for the summary refresh (capped).
+		reportAiTurn(dispatch.callId, {
+			class: "summary",
+			title: "Summarizing conversation",
+			model: summaryLlm.model,
+			promptTokens: res.usage?.promptTokens ?? 0,
+			completionTokens: res.usage?.completionTokens ?? 0,
+			request: chatCtxMessages(evalCtx),
+			response: res.text,
+		});
 		const summary = res.text.trim();
 		if (!summary) return;
 		rollingSummary.text = summary;

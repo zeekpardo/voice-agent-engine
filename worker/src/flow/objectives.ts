@@ -1,5 +1,6 @@
 import { llm, voice } from "@livekit/agents";
 import { z } from "zod";
+import { chatCtxMessages, reportAiTurn } from "../ai-log.js";
 import {
 	type ContactStateEntryT,
 	type DispatchMetadata,
@@ -97,6 +98,8 @@ export interface ObjectivesDeps {
 		temperature?: number;
 		maxTokens?: number;
 	}) => {
+		/** Resolved inference model id (for ai.turn logging). */
+		model: string;
 		chat(opts: { chatCtx: llm.ChatContext }): {
 			collect(): Promise<{ text: string; usage?: { promptTokens?: number; completionTokens?: number } }>;
 		};
@@ -383,6 +386,17 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			// Per-class metering (Phase 4): the judge is a standalone call the session's
 			// MetricsCollected never sees — read usage straight off the collected response.
 			recordUsage(res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
+			// AI-logs panel: full request/response for each judge pass (capped).
+			reportAiTurn(dispatch.callId, {
+				class: "judge",
+				title: "Evaluating objectives",
+				model: judgeLlm.model,
+				promptTokens: res.usage?.promptTokens ?? 0,
+				completionTokens: res.usage?.completionTokens ?? 0,
+				request: chatCtxMessages(evalCtx),
+				response: res.text,
+				extra: { node: rt.nodeId, attempt: attempt + 1 },
+			});
 			const text = res.text
 				.trim()
 				.replace(/^```(?:json)?\s*/i, "")
