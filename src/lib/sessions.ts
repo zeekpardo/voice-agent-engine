@@ -3,6 +3,7 @@ import { jsonb, sql } from "../db/index.js";
 import { agentRuntime } from "../providers/agent-runtime/index.js";
 import type { AgentRow } from "../routes/agents.js";
 import { logCallEvent } from "./call-events.js";
+import { resolveGroupRef } from "./group-ref.js";
 import { newId } from "./id.js";
 
 export interface CreateWebSessionInput {
@@ -17,6 +18,9 @@ export interface CreateWebSessionInput {
 	/** Session channel (Phase 6): "voice" (default) or "text". Persisted on the
 	 * calls row + forwarded in dispatch so the worker builds the right I/O adapter. */
 	channel?: ChannelT;
+	/** Opaque tenant tag for per-group usage attribution. Falls back to
+	 * metadata.source_id when absent so existing callers stay attributed. */
+	groupRef?: string;
 }
 
 export interface WebSessionResult {
@@ -41,12 +45,13 @@ export async function createWebSession(input: CreateWebSessionInput): Promise<We
 	const contactState = input.contactState;
 	const contactTags = input.contactTags;
 	const channel = input.channel ?? "voice";
+	const groupRef = resolveGroupRef(input.groupRef, metadata);
 
 	await sql`
-		INSERT INTO calls (id, project, agent_id, agent_version, direction, status, room_name, variables, metadata, contact_state, contact_tags, channel)
+		INSERT INTO calls (id, project, agent_id, agent_version, direction, status, room_name, variables, metadata, contact_state, contact_tags, channel, group_ref)
 		VALUES (${callId}, ${input.project}, ${input.agent.id}, ${input.agent.version},
 		        'web', 'queued', ${roomName}, ${jsonb(variables)}, ${jsonb(metadata)},
-		        ${contactState ? jsonb(contactState) : null}, ${contactTags ? jsonb(contactTags) : null}, ${channel})`;
+		        ${contactState ? jsonb(contactState) : null}, ${contactTags ? jsonb(contactTags) : null}, ${channel}, ${groupRef ?? null})`;
 
 	// Recording is per-agent opt-in and voice-only — text sessions never record.
 	const recording = input.agent.config.recording?.enabled === true && channel === "voice";

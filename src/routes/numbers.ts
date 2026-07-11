@@ -28,11 +28,13 @@ const notFound = () => new AppError(404, "not_found", "Number not found");
 const NumberBody = z.object({
 	e164: z.string().regex(/^\+[1-9]\d{6,14}$/, "must be E.164, e.g. +16615550142"),
 	inbound_agent_id: z.string().optional(),
+	/** Opaque tenant tag copied onto inbound calls for per-group usage attribution. */
+	group_ref: z.string().max(256).optional(),
 });
 
 numbers.post("/numbers", async (c) => {
 	const key = c.get("apiKey");
-	const { e164, inbound_agent_id } = await parseBody(
+	const { e164, inbound_agent_id, group_ref } = await parseBody(
 		c,
 		NumberBody,
 		(issue) => `Invalid number: ${issue?.message}`,
@@ -47,8 +49,8 @@ numbers.post("/numbers", async (c) => {
 
 	const id = newId("num");
 	await sql`
-		INSERT INTO phone_numbers (id, project, e164, provider_ref, inbound_agent_id)
-		VALUES (${id}, ${key.project}, ${e164}, 'telnyx', ${inbound_agent_id ?? null})`;
+		INSERT INTO phone_numbers (id, project, e164, provider_ref, inbound_agent_id, group_ref)
+		VALUES (${id}, ${key.project}, ${e164}, 'telnyx', ${inbound_agent_id ?? null}, ${group_ref ?? null})`;
 	const rows = await sql`SELECT * FROM phone_numbers WHERE id = ${id}`;
 	return c.json(rows[0], 201);
 });
@@ -92,12 +94,14 @@ const PurchaseBody = z.object({
 	number: z.string().regex(/^\+[1-9]\d{6,14}$/, "must be E.164, e.g. +16615550142"),
 	agentId: z.string().optional(),
 	dispatchRuleId: z.string().optional(),
+	/** Opaque tenant tag copied onto inbound calls for per-group usage attribution. */
+	group_ref: z.string().max(256).optional(),
 });
 
 // POST /v1/numbers/purchase — PurchasePhoneNumber, then mirror into the registry.
 numbers.post("/numbers/purchase", async (c) => {
 	const key = c.get("apiKey");
-	const { number, agentId, dispatchRuleId } = await parseBody(
+	const { number, agentId, dispatchRuleId, group_ref } = await parseBody(
 		c,
 		PurchaseBody,
 		(issue) => `Invalid purchase: ${issue?.message}`,
@@ -120,8 +124,8 @@ numbers.post("/numbers/purchase", async (c) => {
 
 	const id = newId("num");
 	await sql`
-		INSERT INTO phone_numbers (id, project, e164, provider_ref, inbound_agent_id)
-		VALUES (${id}, ${key.project}, ${e164}, ${providerRef}, ${agentId ?? null})`;
+		INSERT INTO phone_numbers (id, project, e164, provider_ref, inbound_agent_id, group_ref)
+		VALUES (${id}, ${key.project}, ${e164}, ${providerRef}, ${agentId ?? null}, ${group_ref ?? null})`;
 	const rows = await sql`
 		SELECT n.*, a.name AS inbound_agent_name
 		FROM phone_numbers n
@@ -174,13 +178,21 @@ numbers.patch("/numbers/:id", async (c) => {
 		SELECT * FROM phone_numbers WHERE id = ${c.req.param("id")} AND project = ${key.project}`;
 	if (!rows[0]) throw notFound();
 
-	const body = (await c.req.json().catch(() => ({}))) as { inbound_agent_id?: string | null };
+	const body = (await c.req.json().catch(() => ({}))) as {
+		inbound_agent_id?: string | null;
+		group_ref?: string | null;
+	};
 	if (body.inbound_agent_id) {
 		const agent = await getAgent(key.project, body.inbound_agent_id);
 		if (!agent) throw badRequest("Unknown inbound_agent_id for this project");
 	}
+	// group_ref is only touched when the key is present, so PATCHes that omit it
+	// (e.g. a routing-only update) leave the existing tag intact.
+	const patchGroupRef = "group_ref" in body;
 	await sql`
-		UPDATE phone_numbers SET inbound_agent_id = ${body.inbound_agent_id ?? null}
+		UPDATE phone_numbers SET
+			inbound_agent_id = ${body.inbound_agent_id ?? null}
+			${patchGroupRef ? sql`, group_ref = ${body.group_ref ?? null}` : sql``}
 		WHERE id = ${c.req.param("id")}`;
 	const updated = await sql`
 		SELECT n.*, a.name AS inbound_agent_name

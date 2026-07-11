@@ -100,12 +100,15 @@ internal.post("/calls/inbound", async (c) => {
 	const bundle = await buildAgentBundle(number.inbound_agent_id as string);
 
 	const callId = newId("call");
+	// Inbound carries no SaaS metadata; attribute the call to the tenant tag the
+	// dialed number carries (if any). Opaque string — the engine never reads it.
 	await sql`
 		INSERT INTO calls (id, project, agent_id, agent_version, direction, status,
-		                   to_number, from_number, room_name, started_at)
+		                   to_number, from_number, room_name, started_at, group_ref)
 		VALUES (${callId}, ${number.project as string}, ${bundle.agent.id as string},
 		        ${bundle.agent.version}, 'inbound', 'active',
-		        ${to_number}, ${from_number}, ${room_name}, now())`;
+		        ${to_number}, ${from_number}, ${room_name}, now(),
+		        ${(number.group_ref as string | null) ?? null})`;
 	await logCallEvent(
 		sql,
 		{ callId, type: "call.started", payload: { direction: "inbound", from: from_number } },

@@ -4,6 +4,7 @@ import { agentRuntime } from "../providers/agent-runtime/index.js";
 import type { DispatchMetadata } from "../providers/agent-runtime/types.js";
 import type { AgentRow } from "../routes/agents.js";
 import { logCallEvent } from "./call-events.js";
+import { resolveGroupRef } from "./group-ref.js";
 import { newId } from "./id.js";
 
 /**
@@ -23,23 +24,28 @@ export interface CreateOutboundInput {
 	metadata?: Record<string, unknown>;
 	contactState?: ContactStateEntryT[];
 	contactTags?: string[];
+	/** Opaque tenant tag for per-group usage attribution. Falls back to
+	 * metadata.source_id when absent so existing callers stay attributed. */
+	groupRef?: string;
 }
 
 export async function createOutboundCall(input: CreateOutboundInput) {
 	const callId = newId("call");
 	const roomName = `va_${callId}`;
 	const scheduled = input.scheduledAt && input.scheduledAt.getTime() > Date.now();
+	const groupRef = resolveGroupRef(input.groupRef, input.metadata);
 
 	await sql`
 		INSERT INTO calls (id, project, agent_id, agent_version, direction, status,
-		                   to_number, from_number, room_name, scheduled_at, variables, metadata, contact_state, contact_tags)
+		                   to_number, from_number, room_name, scheduled_at, variables, metadata, contact_state, contact_tags, group_ref)
 		VALUES (${callId}, ${input.project}, ${input.agent.id}, ${input.agent.version},
 		        'outbound', ${scheduled ? "scheduled" : "queued"},
 		        ${input.to}, ${input.from ?? null}, ${roomName},
 		        ${input.scheduledAt ?? null},
 		        ${jsonb(input.variables ?? {})}, ${jsonb(input.metadata ?? {})},
 		        ${input.contactState ? jsonb(input.contactState) : null},
-		        ${input.contactTags ? jsonb(input.contactTags) : null})`;
+		        ${input.contactTags ? jsonb(input.contactTags) : null},
+		        ${groupRef ?? null})`;
 
 	const eventType = scheduled ? "call.scheduled" : "call.queued";
 	await logCallEvent(
