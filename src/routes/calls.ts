@@ -34,6 +34,9 @@ const OutboundBody = z.object({
 	metadata: z.record(z.unknown()).optional(),
 	contactState: ContactState.optional(),
 	contactTags: ContactTags.optional(),
+	/** Opaque tenant tag for per-group usage attribution; falls back to
+	 * metadata.source_id server-side when absent. */
+	group_ref: z.string().max(256).optional(),
 });
 
 calls.post("/calls", async (c) => {
@@ -57,6 +60,7 @@ calls.post("/calls", async (c) => {
 		metadata: body.metadata,
 		contactState: body.contactState,
 		contactTags: body.contactTags,
+		groupRef: body.group_ref,
 	});
 	return c.json(call, 201);
 });
@@ -72,7 +76,7 @@ calls.get("/calls", async (c) => {
 	const rows = await sql`
 		SELECT id, agent_id, agent_version, direction, status, room_name,
 		       from_number, to_number, summary, extracted,
-		       started_at, ended_at, duration_seconds, end_reason, metadata, created_at
+		       started_at, ended_at, duration_seconds, end_reason, metadata, group_ref, created_at
 		FROM calls
 		WHERE project = ${key.project}
 		  ${agentId ? sql`AND agent_id = ${agentId}` : sql``}

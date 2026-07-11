@@ -217,6 +217,32 @@ const MIGRATIONS: { version: number; name: string; up: string }[] = [
 			ADD COLUMN IF NOT EXISTS recording_url TEXT,
 			ADD COLUMN IF NOT EXISTS recording_egress_id TEXT;`,
 	},
+	{
+		version: 8,
+		name: "usage-attribution-group-ref",
+		// Per-group usage attribution (client-1 gate). `group_ref` is an OPAQUE
+		// tenant tag the consuming SaaS gives meaning to — the engine stays
+		// CRM-neutral and never interprets it. Nullable: unattributed calls /
+		// numbers stay NULL and are excluded from attribution rollups.
+		//
+		// Indexes are designed for BOTH the attribution query (built now) and the
+		// future per-group concurrency limiter (multi-account plan §2):
+		//   - idx_calls_group (project, group_ref, created_at): the usage endpoint
+		//     scans project-equality + optional group_ref-equality + created_at
+		//     range, grouping by group_ref. Leading with `project` matches the
+		//     always-project-scoped WHERE; created_at trailing serves the range.
+		//   - idx_calls_group_active (project, group_ref) WHERE status='active': a
+		//     small partial index for the future limiter's hot path — count live
+		//     calls per group without scanning historical rows.
+		up: `
+		ALTER TABLE calls ADD COLUMN IF NOT EXISTS group_ref TEXT;
+		ALTER TABLE phone_numbers ADD COLUMN IF NOT EXISTS group_ref TEXT;
+		CREATE INDEX IF NOT EXISTS idx_calls_group
+			ON calls(project, group_ref, created_at);
+		CREATE INDEX IF NOT EXISTS idx_calls_group_active
+			ON calls(project, group_ref) WHERE status = 'active';
+		`,
+	},
 ];
 
 /** Apply pending migrations on boot. */

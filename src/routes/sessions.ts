@@ -27,6 +27,9 @@ const SessionBody = z.object({
 	/** Session channel (Phase 6): "voice" (default, audio) or "text" (lk.chat
 	 * text streams, no audio). Sibling of contactState/contactTags. Optional. */
 	channel: Channel.optional(),
+	/** Opaque tenant tag for per-group usage attribution; falls back to
+	 * metadata.source_id server-side when absent. */
+	group_ref: z.string().max(256).optional(),
 });
 
 sessions.post("/sessions", async (c) => {
@@ -48,6 +51,7 @@ sessions.post("/sessions", async (c) => {
 		contactState: body.contactState,
 		contactTags: body.contactTags,
 		channel: body.channel,
+		groupRef: body.group_ref,
 	});
 	return c.json(session, 201);
 });
