@@ -167,6 +167,24 @@ export const AgentConfig = z.object({
 		.optional(),
 
 	/**
+	 * Channel preferences authored in the SaaS builder. The ENGINE never reads
+	 * these — enforcement happens SaaS-side at every dispatch entry point
+	 * (trigger route, inbound-message routing, widget, test portal) and in the
+	 * post-call webhook consumer (voice-fail → text fallback). Rides on the
+	 * config for round-trip/versioning.
+	 * - mode: which channels this agent operates on at all ("both" default).
+	 * - textFallback: when an outbound voice call fails to connect
+	 *   (no_answer / failed / voicemail), the SaaS starts a text conversation
+	 *   with the same workflow instead.
+	 */
+	channels: z
+		.object({
+			mode: z.enum(["voice", "text", "both"]).default("both"),
+			textFallback: z.boolean().default(false),
+		})
+		.optional(),
+
+	/**
 	 * Raw goal text authored in the SaaS builder (the job's overarching
 	 * objective). Compiled into `instructions` (## GOAL) at save time; kept
 	 * separately so re-editing never round-trips the composed prompt.
