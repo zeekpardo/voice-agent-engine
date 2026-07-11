@@ -56,6 +56,13 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 		target: string | undefined,
 		runCtx: voice.RunContext,
 	): Promise<string | llm.AgentHandoff> => {
+		// An exit tool is executing — commit the transition NOW, before the (async)
+		// resolveTarget + swap, so a same-turn end_call (parallel tool call) is
+		// refused rather than killing the call mid-swap. Cleared once the next node
+		// enters (onEnter below); for end/transfer/handoff resolutions the call is
+		// either ending or covered by transferInFlight / handoff in-flight.
+		ctx.state.transitionPending = true;
+		ctx.state.lastTransitionAt = Date.now();
 		// Routers/statements between here and the next agent node are evaluated
 		// inline (routers: one LLM pass; statements: a queued say).
 		const resolved = await resolveTarget(target);
@@ -251,6 +258,16 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 		}
 		if (ctx.endCallEnabled) nodeTools.end_call = ctx.endCallTool;
 
+		// Terminal node = the model may legitimately end_call here. A node is terminal
+		// only when NONE of its regular exits routes onward to a next node — i.e. every
+		// exit is a call-ending exit (no target) or it has no exits at all. Scenarios
+		// are EXCLUDED: they are cross-cutting detect-and-jump exits present on every
+		// node, not part of this node's forward path, so a node with only scenario
+		// exits is still terminal. end_call refuses on a non-terminal node (a stage
+		// with a forward "Next" exit), so the model can't prematurely hang up mid-flow
+		// — it must take the exit; only the final stage closes with end_call.
+		const isTerminalNode = !node.exits.some((e) => !!e.target);
+
 		const exitNames = toolExits.map((e) => `exit_${sanitize(e.name)}`).join(", ");
 		return voice.Agent.create({
 			id: `node:${node.id}`,
@@ -290,6 +307,7 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				"\n\n## IF SOMETHING FAILS\nIf a tool or action fails and you were not given specific wording to say, acknowledge it once briefly, do NOT repeat your last question, and offer to follow up (for example, note that someone will get back to them). Never pretend an action succeeded when it did not." +
 				ctx.pacingRules +
 				ctx.languageRules +
+				ctx.textRules +
 				(ctx.endCallEnabled
 					? "\n\nOnly the end_call tool ends the call — moving between stages never ends it. Use end_call solely when the conversation is truly over and you've said goodbye."
 					: "") +
@@ -303,6 +321,12 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 			tools: nodeTools,
 			onEnter: (agentCtx) => {
 				reportEvent(dispatch.callId, "flow.node", { node: node.id, name: node.name ?? null });
+				// This node is now live: the transition that led here is complete, so
+				// clear the pending flag (the lastTransitionAt 5s window still covers the
+				// immediate tail). And publish this node's terminality so the shared
+				// end_call tool knows whether hanging up here is legitimate.
+				ctx.state.transitionPending = false;
+				ctx.state.currentNodeTerminal = isTerminalNode;
 				// At most one conversation wrap-up timer is ever live: clear any timer
 				// armed by a previous node before (re)arming below.
 				if (ctx.state.conversationTimer) {

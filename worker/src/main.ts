@@ -111,6 +111,8 @@ export default defineAgent({
 			hangUp: async () => {},
 			completed: false,
 			transferInFlight: false,
+			transitionPending: false,
+			currentNodeTerminal: true,
 			ttsOverride: undefined,
 			conversationTimer: undefined,
 			usage: createUsageRecorder(),

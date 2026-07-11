@@ -119,6 +119,14 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		shared.dispatch.channel !== "text"
 			? "\n\n## LANGUAGE\nAlways reply in the language the caller is currently speaking. If they switch languages mid-conversation, switch with them immediately — same voice, no comment about the change — and stay in the new language until they switch again."
 			: "";
+	// Text channel: the user TYPES their answers, so read-back confirmations that
+	// make sense on a voice call (spelling out a phone number or email digit by
+	// digit) are pointless and awkward. Suppress them on text only; voice keeps the
+	// current read-back behavior (confirming critical fields aloud is correct there).
+	const textRules =
+		shared.dispatch.channel === "text"
+			? "\n\n## TEXT CHAT\nThis is a text chat, not a phone call. The user TYPED their answers, so you already have their exact spelling. NEVER spell out, read back, or ask them to confirm phone numbers, emails, or addresses character by character or digit by digit — accept typed values exactly as given. Skip voice-style read-back confirmations; only re-ask when a value is genuinely missing or ambiguous."
+			: "";
 
 	const missingVars = new Set<string>();
 	collectMissingVars(config.instructions, variables, missingVars);
@@ -133,7 +141,8 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 			? `\n\n## MISSING CONTEXT\nThese context values were NOT provided for this call: ${[...missingVars].join(", ")}. Their {{placeholders}} may appear in your notes — NEVER say a placeholder token aloud. Speak naturally without the value, and if you genuinely need it (like the caller's name or their property address), simply ask the caller.`
 			: "";
 
-	const instructions = globalInstructions + pacingRules + languageRules + endCallGuidance + missingNote + prohibited;
+	const instructions =
+		globalInstructions + pacingRules + languageRules + textRules + endCallGuidance + missingNote + prohibited;
 
 	const endCallTool = llm.tool({
 		description:
@@ -152,13 +161,30 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 			// transfer / handoff tool (parallel tool calls), which would kill the
 			// call mid-transition (observed live: the flow exited to its next node
 			// and end_call hung up before the node ever entered). Refuse while a
-			// transfer is in flight or within a short window of any node swap.
+			// transfer is in flight, while an exit to a real next node is committed
+			// but not yet entered (transitionPending — covers the objectives judge's
+			// idle-wait, where the lastTransitionAt window has long since lapsed), or
+			// within a short window of any completed node swap.
 			const sinceTransition = Date.now() - (state.lastTransitionAt ?? 0);
-			if (state.transferInFlight || sinceTransition < 5000) {
+			if (state.transferInFlight || state.transitionPending || sinceTransition < 5000) {
 				return {
 					error: "transition_in_progress",
 					message:
 						"The call just moved to a new stage — do not hang up. Continue the conversation at the current stage; only end the call after its purpose is complete and you've said goodbye.",
+				};
+			}
+			// Terminal-node gate (the robust fix): the model repeatedly decides the
+			// call is "done" mid-flow and hangs up while stages remain (observed live
+			// on both a voice call at the transition and a text call a turn later).
+			// end_call is only legitimate on a terminal node — one with no forward exit
+			// to a next stage. On a non-terminal stage, refuse and steer the model to
+			// take its exit instead. currentNodeTerminal defaults true, so a
+			// single-agent (no-flow) config is unaffected.
+			if (state.currentNodeTerminal === false) {
+				return {
+					error: "not_terminal_stage",
+					message:
+						"There are more stages in this conversation — do not end the call. Take the appropriate exit to continue; only use end_call from the final stage, after you've said goodbye.",
 				};
 			}
 			await runCtx.waitForPlayout().catch(() => {});
@@ -232,6 +258,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		globalInstructions,
 		pacingRules,
 		languageRules,
+		textRules,
 		missingNote,
 		prohibited,
 		fieldWriteDef,
@@ -273,6 +300,12 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		startHandoff: handoff.startHandoff,
 		hangUp: (reason: string) => state.hangUp(reason),
 		isCompleted: () => state.completed,
+		// Committed-transition flag: set the moment the judge decides to advance so
+		// a same-turn (or idle-wait-window) end_call is refused; cleared on abort here
+		// and by buildFlowAgent onEnter once the next node enters.
+		setTransitionPending: (pending: boolean) => {
+			state.transitionPending = pending;
+		},
 		judgeModel: models.judge,
 		recordUsage: (inTok, outTok) => state.usage.record("judge", inTok, outTok),
 	});

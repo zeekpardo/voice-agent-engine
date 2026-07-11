@@ -127,6 +127,11 @@ export interface ObjectivesDeps {
 	hangUp: (reason: string) => Promise<void>;
 	/** True once call completion has already been reported. */
 	isCompleted: () => boolean;
+	/** Flip the shared `transitionPending` flag. Set true the moment the judge
+	 * commits to advancing (before the idle-wait), so a model-emitted end_call in
+	 * that window is refused; cleared on abort here, and by buildFlowAgent onEnter
+	 * once the next node actually enters. Mirrors the transferInFlight pattern. */
+	setTransitionPending: (pending: boolean) => void;
 	/** Judge model tier (config.models.judge). Sets the DEFAULT judge model; a
 	 * per-node node.judge override still wins. Unset → grok-4-fast (unchanged). */
 	judgeModel?: string;
@@ -209,7 +214,7 @@ function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promi
 }
 
 export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
-	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, startHandoff, hangUp, isCompleted, judgeModel, recordUsage } =
+	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, startHandoff, hangUp, isCompleted, setTransitionPending, judgeModel, recordUsage } =
 		deps;
 	// `session` is a LAZY getter on deps (the AgentSession is built after this
 	// factory wires up) — it MUST be read fresh via deps.session at call time.
@@ -534,6 +539,12 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			writeObjectiveField(o, p.answer, p);
 		}
 		rt.transitioning = true;
+		// Commit the transition NOW (before the idle-wait below, which can take
+		// seconds): a model that emits end_call in this window would otherwise pass
+		// the lastTransitionAt guard (the current node was entered long ago) and kill
+		// the call mid-advance — the exact live bug. Cleared on abort here, and by
+		// buildFlowAgent onEnter once the next node enters.
+		setTransitionPending(true);
 		reportEvent(dispatch.callId, "flow.objectives_met", { node: rt.nodeId });
 		void (async () => {
 			// Never cut the agent off mid-sentence: transition at the next turn
@@ -541,8 +552,14 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			const session = getSession();
 			await waitForAgentIdle(session, 15_000);
 			// A scenario/secondary exit (or hangup) may have moved the call on.
-			if (isCompleted() || activeObjectives !== rt) return;
-			if (session.currentAgent.id !== `node:${rt.nodeId}`) return;
+			if (isCompleted() || activeObjectives !== rt) {
+				setTransitionPending(false);
+				return;
+			}
+			if (session.currentAgent.id !== `node:${rt.nodeId}`) {
+				setTransitionPending(false);
+				return;
+			}
 			reportEvent(dispatch.callId, "flow.exit", {
 				node: rt.nodeId,
 				exit: rt.exitName,
