@@ -67,6 +67,13 @@ export interface AssembleParams {
 	 * copy). Present on a handoff so the caller isn't re-greeted; omitted for the
 	 * call's first agent (fresh session). */
 	entryChatCtx?: llm.ChatContext;
+	/** Fired from the assembled ENTRY agent's onEnter — i.e. once its activity is
+	 * actually live on the session. flow/handoff uses it to nudge the handed-off
+	 * target to speak first: issuing generateReply right after updateAgent races
+	 * the activity swap (the reply lands on the old, draining activity and is
+	 * dropped), while onEnter runs inside the NEW activity's startup. Omitted for
+	 * the call's first agent (the greeting covers the opening). */
+	entryOnEnter?: () => void;
 }
 
 export interface AssembledAgent {
@@ -82,7 +89,7 @@ export interface AssembledAgent {
 
 export function assembleAgent(shared: AssembleShared, params: AssembleParams): AssembledAgent {
 	const { job: ctx, variables, turns, contactState, contactTags, rollingSummary, state, EMPTY_PARAMS } = shared;
-	const { bundle, dispatch, handoff, entryChatCtx } = params;
+	const { bundle, dispatch, handoff, entryChatCtx, entryOnEnter } = params;
 	const config: AgentConfig = bundle.agent.config;
 
 	const endCallEnabled = config.endCall?.enabled !== false;
@@ -168,11 +175,14 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		// conversation continuous (no re-greeting); the call's first agent gets none.
 		const tools = buildTools(bundle.tools, dispatch);
 		if (endCallEnabled) tools.end_call = endCallTool;
-		const agent = new voice.Agent({
+		// Agent.create (not the constructor) so a handed-off target can hook
+		// onEnter — the nudge that makes it speak first (see AssembleParams).
+		const agent = voice.Agent.create({
 			instructions,
 			llm: defaultLlm,
 			tools,
 			...(entryChatCtx ? { chatCtx: entryChatCtx } : {}),
+			...(entryOnEnter ? { onEnter: () => entryOnEnter() } : {}),
 		});
 		return { agent, config };
 	}
@@ -238,6 +248,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		runTransfer,
 		runHandoff: handoff.runHandoff,
 		getObjectivesTracker: () => objectivesTracker,
+		entryOnEnter,
 	});
 	objectivesTracker = createObjectivesTracker({
 		dispatch,

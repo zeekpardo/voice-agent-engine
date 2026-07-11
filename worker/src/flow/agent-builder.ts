@@ -37,11 +37,15 @@ export interface AgentBuilderDeps {
 	/** The objectives tracker is constructed after this builder (it depends on
 	 * buildFlowAgent), so it is reached lazily from onEnter. */
 	getObjectivesTracker(): ObjectivesTracker;
+	/** Fired from the ENTRY node's onEnter (once its activity is live). Set only
+	 * when this build is a handoff target — flow/handoff's speak-first nudge.
+	 * The call's own first agent passes none (the greeting opens the call). */
+	entryOnEnter?: () => void;
 }
 
 export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDeps): AgentBuilder {
 	const { flow, nodesById, dispatch, bundle } = ctx;
-	const { resolveTarget, runTransfer, runHandoff, getObjectivesTracker } = deps;
+	const { resolveTarget, runTransfer, runHandoff, getObjectivesTracker, entryOnEnter } = deps;
 
 	/**
 	 * Shared tail of every exit tool (regular exits and scenario exits):
@@ -334,10 +338,15 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 						});
 					}, conversation!.maxDurationSeconds * 1000);
 				}
-				// Entry node speech is the greeting (step 8); later nodes open
-				// themselves. Not awaited — awaiting playout inside a
-				// tool-triggered onEnter deadlocks the tool call.
-				if (node.id !== flow.entry) {
+				// Entry node speech is the greeting (step 8) — except on a HANDOFF,
+				// where the target's entry agent opens via the controller's nudge
+				// (entryOnEnter fires here, inside the new activity's startup — the
+				// only point where generateReply reliably lands on the NEW activity).
+				// Later nodes open themselves. Not awaited — awaiting playout inside
+				// a tool-triggered onEnter deadlocks the tool call.
+				if (node.id === flow.entry) {
+					entryOnEnter?.();
+				} else {
 					// If the last thing spoken is an agent question the caller
 					// hasn't answered (an exit fired early, or speech queued
 					// ahead of the handoff), opening this stage would stack a
