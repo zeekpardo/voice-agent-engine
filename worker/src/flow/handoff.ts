@@ -28,7 +28,14 @@ export interface HandoffTarget {
 	agentId: string;
 	/** The source flow's handoff node id (for the flow.handoff event). */
 	fromNode: string;
+	/** The node's optional transition moment: announcement (spoken in the
+	 * SOURCE agent's voice) + hold music before the swap. */
+	transition?: { say?: string; holdSeconds?: number };
 }
+
+/** Hold music to play when the node doesn't set holdSeconds — a short beat so
+ * the handoff feels deliberate. 0 in the node config disables it entirely. */
+const DEFAULT_HOLD_SECONDS = 3;
 
 export interface Handoff {
 	/** Start the detached handoff sequence (engine paths: objectives / transfer chain). */
@@ -95,6 +102,40 @@ export function createHandoff(shared: AssembleShared): Handoff {
 		if (!session) {
 			inFlight = false;
 			return;
+		}
+
+		// Transition moment (voice channel only): optional announcement in the
+		// SOURCE agent's voice, then hold music — the same CloseBot-style beat the
+		// simulated transfer plays, so a handoff sounds like being connected to a
+		// colleague rather than an instant personality swap. Runs AFTER the fetch
+		// guards (never play music into a call that's about to end) and BEFORE the
+		// ttsOverride below (the announcement belongs to the outgoing agent).
+		if (shared.dispatch.channel !== "text") {
+			const t = target.transition;
+			if (t?.say) {
+				const spoken = t.say.replace(
+					/\{\{\s*([\w.]+)\s*\}\}/g,
+					(_, key: string) => shared.variables[key] ?? "",
+				);
+				const handle = session.say(spoken, { allowInterruptions: false });
+				await handle.waitForPlayout().catch(() => {});
+			}
+			const holdSeconds = Math.max(0, Math.min(30, t?.holdSeconds ?? DEFAULT_HOLD_SECONDS));
+			if (holdSeconds > 0) {
+				try {
+					const player = new voice.BackgroundAudioPlayer();
+					await player.start({ room: shared.job.room, agentSession: session });
+					const music = player.play(
+						{ source: voice.BuiltinAudioClip.HOLD_MUSIC, volume: 0.7 },
+						true,
+					);
+					await new Promise((resolve) => setTimeout(resolve, holdSeconds * 1000));
+					music.stop();
+					await player.close?.();
+				} catch (err) {
+					console.error("flow: handoff hold music failed (continuing)", err);
+				}
+			}
 		}
 
 		reportEvent(callId, "flow.handoff", {
