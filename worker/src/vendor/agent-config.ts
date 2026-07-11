@@ -640,6 +640,13 @@ export const AgentConfig = z.object({
 			summarize: z.boolean().default(true),
 			/** Named fields + extraction instructions, e.g. { appointment_scheduled: "true/false…" } */
 			extract: z.record(z.string()).optional(),
+			/**
+			 * Optional CRM contact-field target the consuming SaaS writes the call
+			 * summary to after the call. The ENGINE never reads this — it's a
+			 * SaaS-side sync target that simply rides on the config so it
+			 * round-trips through save/publish without being stripped.
+			 */
+			summaryField: z.string().nullish(),
 		})
 		.default({}),
 
