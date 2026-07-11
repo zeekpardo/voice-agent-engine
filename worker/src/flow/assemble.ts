@@ -134,6 +134,19 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 						"The conversation just started — do not hang up. Continue helping the caller and only end the call once its purpose is complete and the caller confirms they need nothing else.",
 				};
 			}
+			// Mixed-turn guard: models emit end_call IN THE SAME TURN as an exit /
+			// transfer / handoff tool (parallel tool calls), which would kill the
+			// call mid-transition (observed live: the flow exited to its next node
+			// and end_call hung up before the node ever entered). Refuse while a
+			// transfer is in flight or within a short window of any node swap.
+			const sinceTransition = Date.now() - (state.lastTransitionAt ?? 0);
+			if (state.transferInFlight || sinceTransition < 5000) {
+				return {
+					error: "transition_in_progress",
+					message:
+						"The call just moved to a new stage — do not hang up. Continue the conversation at the current stage; only end the call after its purpose is complete and you've said goodbye.",
+				};
+			}
 			await runCtx.waitForPlayout().catch(() => {});
 			await state.hangUp("agent_hangup");
 			return "call ended";

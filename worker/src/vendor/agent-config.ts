@@ -290,6 +290,19 @@ export const AgentConfig = z.object({
 						 * gateway resolves.
 						 */
 						handoffAgentId: z.string().min(1).optional(),
+						/**
+						 * handoff-only: the transition moment before the swap — an optional
+						 * announcement spoken in the SOURCE agent's voice, then hold music
+						 * while the target takes over. `holdSeconds` 0 disables the music;
+						 * omitted → a short runtime default so handoffs feel deliberate
+						 * rather than abrupt. Voice-channel only (text sessions skip both).
+						 */
+						handoff: z
+							.object({
+								say: z.string().optional(),
+								holdSeconds: z.number().min(0).max(30).optional(),
+							})
+							.optional(),
 						instructions: z.string().min(1),
 						/**
 						 * Conversation mode (Phase 2 — CloseBot's objective-less "keep the

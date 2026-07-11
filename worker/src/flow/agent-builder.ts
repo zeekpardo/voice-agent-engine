@@ -29,7 +29,11 @@ export interface AgentBuilderDeps {
 	runTransfer(nodeId: string): Promise<string>;
 	/** Exit-tool entry into an agent-handoff (flow `handoff` node): start the
 	 * detached fetch+swap sequence, then end the LLM turn with no reply. */
-	runHandoff(target: { agentId: string; fromNode: string }): never;
+	runHandoff(target: {
+		agentId: string;
+		fromNode: string;
+		transition?: { say?: string; holdSeconds?: number };
+	}): never;
 	/** The objectives tracker is constructed after this builder (it depends on
 	 * buildFlowAgent), so it is reached lazily from onEnter. */
 	getObjectivesTracker(): ObjectivesTracker;
@@ -67,7 +71,11 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 			return runTransfer(resolved.nodeId);
 		}
 		if (resolved.kind === "handoff") {
-			return runHandoff({ agentId: resolved.agentId, fromNode: resolved.fromNode });
+			return runHandoff({
+				agentId: resolved.agentId,
+				fromNode: resolved.fromNode,
+				transition: resolved.transition,
+			});
 		}
 		const nextCtx = runCtx.session.currentAgent.chatCtx.copy({
 			excludeInstructions: true,
@@ -79,6 +87,10 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 	};
 
 	const buildFlowAgent = (nodeId: string, chatCtx?: llm.ChatContext): voice.Agent => {
+		// Stamp every node→node swap: end_call refuses to fire near a transition,
+		// so a model emitting end_call in the SAME turn as an exit tool (parallel
+		// tool calls) can't kill the call mid-swap.
+		ctx.state.lastTransitionAt = Date.now();
 		const node = nodesById.get(nodeId);
 		if (!node) throw new Error(`flow node "${nodeId}" not found`);
 		if (

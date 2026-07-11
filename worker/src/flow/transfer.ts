@@ -48,7 +48,11 @@ export interface TransferDeps {
 	resolveTarget(target: string | undefined): Promise<ResolvedTarget>;
 	buildFlowAgent(nodeId: string, chatCtx?: llm.ChatContext): voice.Agent;
 	/** Start an agent-handoff sequence when a transfer chains into a `handoff` node. */
-	startHandoff(target: { agentId: string; fromNode: string }): void;
+	startHandoff(target: {
+		agentId: string;
+		fromNode: string;
+		transition?: { say?: string; holdSeconds?: number };
+	}): void;
 }
 
 /** Minimal shape of a room participant we read for SIP identity resolution. */
@@ -252,7 +256,11 @@ export function createTransfer(ctx: FlowRuntimeContext, deps: TransferDeps): Tra
 			} else if (next.kind === "end") {
 				await ctx.hangUp("flow_complete");
 			} else if (next.kind === "handoff") {
-				startHandoff({ agentId: next.agentId, fromNode: next.fromNode });
+				startHandoff({
+					agentId: next.agentId,
+					fromNode: next.fromNode,
+					transition: next.transition,
+				});
 			}
 			// end_after_speech: a terminal statement queued its own hangup.
 			// A transfer chaining into another transfer is not supported.

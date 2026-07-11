@@ -63,7 +63,12 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 					console.error(`flow: handoff node "${node.id}" has no handoffAgentId — ending call`);
 					return { kind: "end" };
 				}
-				return { kind: "handoff", agentId: node.handoffAgentId, fromNode: node.id };
+				return {
+					kind: "handoff",
+					agentId: node.handoffAgentId,
+					fromNode: node.id,
+					transition: node.handoff,
+				};
 			}
 
 			if (node.kind === "transfer") {
