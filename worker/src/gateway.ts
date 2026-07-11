@@ -91,6 +91,23 @@ export async function fetchAgentBundle(agentId: string, version: number): Promis
 	return bundle;
 }
 
+/**
+ * Agent-handoff (flow `handoff` node): fetch the TARGET agent's CURRENT live
+ * config — the version omitted, so the gateway resolves the agent's published
+ * `agents.version` (buildAgentBundle in src/routes/internal.ts). The handed-off
+ * call always continues under the target's latest published config, not a pinned
+ * snapshot. Not cached: handoffs are rare and must reflect the live config. The
+ * returned bundle's `agent.version` is the resolved version (recorded on the
+ * flow.handoff event + used for the swapped dispatch metadata).
+ */
+export async function fetchAgentBundleLatest(agentId: string): Promise<AgentBundle> {
+	const res = await gatewayFetch(`/internal/agents/${agentId}`);
+	if (!res.ok) {
+		throw new Error(`gateway agent fetch failed (${res.status}): ${await res.text()}`);
+	}
+	return (await res.json()) as AgentBundle;
+}
+
 /** Fire-and-forget lifecycle event (call.started, tool.invoked, …). */
 export function reportEvent(callId: string, type: string, payload: Record<string, unknown> = {}): void {
 	void gatewayFetch(`/internal/calls/${callId}/events`, {

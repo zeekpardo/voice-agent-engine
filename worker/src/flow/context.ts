@@ -219,6 +219,15 @@ export interface FlowRuntimeState {
 	 * refresh, and router evaluations — tags its tokens here so the completion
 	 * report carries a per-class breakdown plus the summed legacy total meters. */
 	usage: UsageRecorder;
+	/**
+	 * Active per-caller-turn hooks (objective judge + rolling-memory refresh),
+	 * read fresh by session-lifecycle's ConversationItemAdded listener on every
+	 * caller turn. A MUTABLE holder so an agent-handoff (flow `handoff` node) can
+	 * swap in the NEW agent's trackers when it calls session.updateAgent — the old
+	 * agent's trackers stop firing, the target's take over. Populated once by
+	 * main.ts for the call's own agent; re-pointed by flow/handoff on each handoff.
+	 */
+	turnHooks: { objective?: () => void; memory?: () => void };
 }
 
 /** Resolved rolling-memory settings (config.memory with defaults applied). */

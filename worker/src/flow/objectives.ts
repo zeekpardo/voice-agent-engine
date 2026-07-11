@@ -36,7 +36,12 @@ export type ResolvedTarget =
 	| { kind: "agent"; id: string }
 	| { kind: "end" }
 	| { kind: "end_after_speech" }
-	| { kind: "transfer"; nodeId: string };
+	| { kind: "transfer"; nodeId: string }
+	/** A `handoff` node: hand the live call to a DIFFERENT published agent
+	 * (target agent id resolved to `agentId`, from the source flow `fromNode`).
+	 * Handled by flow/handoff — fetch the target config, build+swap its entry
+	 * agent, carry context, one-way. */
+	| { kind: "handoff"; agentId: string; fromNode: string };
 
 interface ObjectiveProgress {
 	met: boolean;
@@ -102,6 +107,9 @@ export interface ObjectivesDeps {
 	buildFlowAgent: (nodeId: string, chatCtx?: llm.ChatContext) => voice.Agent;
 	/** Starts a simulated warm-transfer sequence for a transfer node. */
 	startTransfer: (nodeId: string) => void;
+	/** Starts an agent-handoff sequence (flow `handoff` node): fetch the target
+	 * agent's config, build+swap its entry agent carrying context. One-way. */
+	startHandoff: (target: { agentId: string; fromNode: string }) => void;
 	/** Agent-initiated hangup (flushes + tears down the room). */
 	hangUp: (reason: string) => Promise<void>;
 	/** True once call completion has already been reported. */
@@ -188,7 +196,7 @@ function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promi
 }
 
 export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
-	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, hangUp, isCompleted, judgeModel, recordUsage } =
+	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, startHandoff, hangUp, isCompleted, judgeModel, recordUsage } =
 		deps;
 	// `session` is a LAZY getter on deps (the AgentSession is built after this
 	// factory wires up) — it MUST be read fresh via deps.session at call time.
@@ -526,6 +534,8 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 				await hangUp("flow_complete");
 			} else if (resolved.kind === "transfer") {
 				startTransfer(resolved.nodeId);
+			} else if (resolved.kind === "handoff") {
+				startHandoff({ agentId: resolved.agentId, fromNode: resolved.fromNode });
 			}
 			// end_after_speech: the terminal statement queued its own hangup.
 		})().catch((err) => console.error("flow: objective transition failed", err));
