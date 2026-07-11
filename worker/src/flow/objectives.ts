@@ -47,7 +47,7 @@ export type ResolvedTarget =
 			kind: "handoff";
 			agentId: string;
 			fromNode: string;
-			transition?: { say?: string; holdSeconds?: number };
+			transition?: { say?: string; generate?: boolean; holdSeconds?: number };
 	  };
 
 interface ObjectiveProgress {

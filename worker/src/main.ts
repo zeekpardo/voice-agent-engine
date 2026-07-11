@@ -12,6 +12,7 @@ import {
 	type FlowRuntimeState,
 	type Turn,
 	createUsageRecorder,
+	interpolate,
 	interpolateSpoken,
 } from "./flow/context.js";
 import { type AssembleShared, assembleAgent } from "./flow/assemble.js";
@@ -101,7 +102,15 @@ export default defineAgent({
 		// The spoken greeting (call start only — a handoff never re-greets). All
 		// other model/prompt assembly lives in flow/assemble (built per config, so
 		// a handed-off target rebuilds its own prompt).
-		const greeting = config.greeting ? interpolateSpoken(config.greeting, variables) : undefined;
+		// generate=true: keep {{placeholders}} visible (interpolate) so the model,
+		// which generates the opener from this DIRECTION, sees them like any other
+		// direction. Verbatim (default): interpolateSpoken strips unknowns for TTS.
+		const greetingGenerate = config.greetingGenerate === true;
+		const greeting = config.greeting
+			? greetingGenerate
+				? interpolate(config.greeting, variables)
+				: interpolateSpoken(config.greeting, variables)
+			: undefined;
 
 		// Shared, mutable runtime slots. session-lifecycle installs the real
 		// session / hangUp and flips `completed`; the flow modules read these lazily.
@@ -167,6 +176,7 @@ export default defineAgent({
 			state,
 			agent: assembled.agent,
 			greeting,
+			greetingGenerate,
 			isInbound: !!rawMetadata.inbound,
 			channel,
 		});
