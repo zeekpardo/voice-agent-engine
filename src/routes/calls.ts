@@ -74,7 +74,7 @@ calls.get("/calls", async (c) => {
 	const limit = Math.min(Number(c.req.query("limit") ?? 50) || 50, 200);
 
 	const rows = await sql`
-		SELECT id, agent_id, agent_version, direction, status, room_name,
+		SELECT id, agent_id, agent_version, direction, status, queued_reason, room_name,
 		       from_number, to_number, summary, extracted,
 		       started_at, ended_at, duration_seconds, end_reason, metadata, group_ref, created_at
 		FROM calls
