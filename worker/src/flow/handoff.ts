@@ -1,6 +1,7 @@
 import { voice } from "@livekit/agents";
 import { type AgentBundle, type DispatchMetadata, fetchAgentBundleLatest, reportEvent } from "../gateway.js";
 import { type AssembleShared, assembleAgent } from "./assemble.js";
+import { buildTts } from "./context.js";
 
 /**
  * Agent-handoff (flow `handoff` node): hand the LIVE call off to a DIFFERENT
@@ -112,6 +113,12 @@ export function createHandoff(shared: AssembleShared): Handoff {
 			agentId: bundle.agent.id,
 			agentVersion: bundle.agent.version,
 		};
+		// Speak in the TARGET's voice from its first word: the session TTS was
+		// built from the ORIGINAL agent's config and updateAgent alone never
+		// re-applies it. Same override slot the simulated transfer's voice swap
+		// uses — agent-builder passes state.ttsOverride into every agent it
+		// constructs, so this must be set BEFORE assembleAgent builds the target.
+		shared.state.ttsOverride = buildTts(bundle.agent.config.tts);
 		const assembled = assembleAgent(shared, {
 			bundle,
 			dispatch: targetDispatch,
