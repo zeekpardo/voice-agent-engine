@@ -1,7 +1,7 @@
 import { voice } from "@livekit/agents";
 import { type AgentBundle, type DispatchMetadata, fetchAgentBundleLatest, reportEvent } from "../gateway.js";
 import { type AssembleShared, assembleAgent } from "./assemble.js";
-import { buildTts } from "./context.js";
+import { buildTts, interpolate } from "./context.js";
 
 /**
  * Agent-handoff (flow `handoff` node): hand the LIVE call off to a DIFFERENT
@@ -208,6 +208,18 @@ export function createHandoff(shared: AssembleShared): Handoff {
 		// handed-off agent stayed silent until the caller spoke). onEnter runs
 		// inside the NEW activity's startup — the same mechanism non-entry flow
 		// nodes use to open their stage.
+		// The target's entry-node "entry message" (a spoken DIRECTION, e.g.
+		// "Introduce yourself as the selling specialist…"), if it set one, is the
+		// target's opening line on this fresh entry. On a normal (non-handoff) call
+		// the engine ignores the entry node's entryInstructions (the greeting opens),
+		// so it only ever surfaces here. Interpolated for {{variables}}; the LANGUAGE
+		// rule in the assembled agent makes the model translate it into the caller's
+		// current language rather than TTS'ing a verbatim string.
+		const targetFlow = bundle.agent.config.flow;
+		const openingDirection = targetFlow
+			? targetFlow.nodes.find((n) => n.id === targetFlow.entry)?.entryInstructions?.trim()
+			: undefined;
+
 		// Skip when the last thing said is an unanswered agent question — opening
 		// would stack a second question; let the caller answer first.
 		let nudged = false;
@@ -227,8 +239,9 @@ export function createHandoff(shared: AssembleShared): Handoff {
 				return;
 			}
 			sess.generateReply({
-				instructions:
-					"You have just taken over this same ongoing call. Continue it in your own role — no greeting, no re-introduction, no recap of what was already covered. Move naturally to your first point or question.",
+				instructions: openingDirection
+					? `You have just taken over this same ongoing call. ${interpolate(openingDirection, shared.variables)} Do not recap what was already covered. Speak in the language the caller is currently using.`
+					: "You have just taken over this same ongoing call. Continue it in your own role — no greeting, no re-introduction, no recap of what was already covered. Move naturally to your first point or question.",
 			});
 		};
 
