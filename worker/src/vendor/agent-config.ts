@@ -317,6 +317,14 @@ export const AgentConfig = z.object({
 							})
 							.optional(),
 						/**
+						 * Channels this node applies to. Omitted = every channel. The SaaS
+						 * compiler marks voice-only/text-only nodes; the voice worker and the
+						 * turn-based conversation runner MAY skip nodes excluded from their
+						 * channel (runtime skipping is a follow-up — today the mark simply
+						 * round-trips instead of being stripped).
+						 */
+						channels: z.array(z.enum(["voice", "text"])).optional(),
+						/**
 						 * handoff-only: the id of the DIFFERENT published agent this node
 						 * hands the live call off to. The worker fetches that agent's current
 						 * config from the gateway, builds its entry agent (its flow.entry, or a
