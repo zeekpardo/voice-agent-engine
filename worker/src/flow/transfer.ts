@@ -23,11 +23,13 @@ export interface Transfer {
 export interface TransferDeps {
 	resolveTarget(target: string | undefined): Promise<ResolvedTarget>;
 	buildFlowAgent(nodeId: string, chatCtx?: llm.ChatContext): voice.Agent;
+	/** Start an agent-handoff sequence when a transfer chains into a `handoff` node. */
+	startHandoff(target: { agentId: string; fromNode: string }): void;
 }
 
 export function createTransfer(ctx: FlowRuntimeContext, deps: TransferDeps): Transfer {
 	const { nodesById, dispatch } = ctx;
-	const { resolveTarget, buildFlowAgent } = deps;
+	const { resolveTarget, buildFlowAgent, startHandoff } = deps;
 
 	// Lazily-started hold-music player, shared across transfers on this call.
 	let backgroundAudio: voice.BackgroundAudioPlayer | null = null;
@@ -92,6 +94,8 @@ export function createTransfer(ctx: FlowRuntimeContext, deps: TransferDeps): Tra
 				ctx.session.updateAgent(buildFlowAgent(next.id, nextCtx));
 			} else if (next.kind === "end") {
 				await ctx.hangUp("flow_complete");
+			} else if (next.kind === "handoff") {
+				startHandoff({ agentId: next.agentId, fromNode: next.fromNode });
 			}
 			// end_after_speech: a terminal statement queued its own hangup.
 			// A transfer chaining into another transfer is not supported.

@@ -25,6 +25,9 @@ export interface AgentBuilder {
 export interface AgentBuilderDeps {
 	resolveTarget(target: string | undefined): Promise<ResolvedTarget>;
 	runTransfer(nodeId: string): never;
+	/** Exit-tool entry into an agent-handoff (flow `handoff` node): start the
+	 * detached fetch+swap sequence, then end the LLM turn with no reply. */
+	runHandoff(target: { agentId: string; fromNode: string }): never;
 	/** The objectives tracker is constructed after this builder (it depends on
 	 * buildFlowAgent), so it is reached lazily from onEnter. */
 	getObjectivesTracker(): ObjectivesTracker;
@@ -32,7 +35,7 @@ export interface AgentBuilderDeps {
 
 export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDeps): AgentBuilder {
 	const { flow, nodesById, dispatch, bundle } = ctx;
-	const { resolveTarget, runTransfer, getObjectivesTracker } = deps;
+	const { resolveTarget, runTransfer, runHandoff, getObjectivesTracker } = deps;
 
 	/**
 	 * Shared tail of every exit tool (regular exits and scenario exits):
@@ -61,6 +64,9 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 		if (resolved.kind === "transfer") {
 			return runTransfer(resolved.nodeId);
 		}
+		if (resolved.kind === "handoff") {
+			return runHandoff({ agentId: resolved.agentId, fromNode: resolved.fromNode });
+		}
 		const nextCtx = runCtx.session.currentAgent.chatCtx.copy({
 			excludeInstructions: true,
 		});
@@ -73,9 +79,14 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 	const buildFlowAgent = (nodeId: string, chatCtx?: llm.ChatContext): voice.Agent => {
 		const node = nodesById.get(nodeId);
 		if (!node) throw new Error(`flow node "${nodeId}" not found`);
-		if (node.kind === "router" || node.kind === "statement" || node.kind === "transfer") {
+		if (
+			node.kind === "router" ||
+			node.kind === "statement" ||
+			node.kind === "transfer" ||
+			node.kind === "handoff"
+		) {
 			throw new Error(
-				`flow node "${nodeId}" is a ${node.kind} — routers, statements and transfers are evaluated inline via resolveTarget and never become agents`,
+				`flow node "${nodeId}" is a ${node.kind} — routers, statements, transfers and handoffs are evaluated inline via resolveTarget and never become agents`,
 			);
 		}
 

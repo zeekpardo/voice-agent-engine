@@ -370,12 +370,6 @@ export interface SessionLifecycleDeps {
 	isInbound: boolean;
 	/** Session channel (Phase 6): selects the I/O adapter. Defaults to voice. */
 	channel: "voice" | "text";
-	/** Fired after each recorded caller turn (flow objective judging); absent
-	 * on the single-agent path. */
-	objectiveUserTurnHook?: () => void;
-	/** Fired after each recorded caller turn (rolling-summary refresh); absent
-	 * on the single-agent path or when memory is disabled. */
-	memoryUserTurnHook?: () => void;
 }
 
 const DEFAULT_DISCLOSURE = "Just so you know, you're speaking with an A.I. assistant.";
@@ -422,10 +416,11 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 		if (role === "agent" && text) channel.emitAgentTurn(text);
 		// Judge objectives off the hot path: fires AFTER the turn is recorded
 		// so the judge always sees the caller's latest words. Async — never
-		// delays the reply that's already generating.
+		// delays the reply that's already generating. Read fresh off state.turnHooks
+		// so an agent handoff (flow.handoff) swaps in the TARGET's trackers.
 		if (role === "user" && text) {
-			deps.objectiveUserTurnHook?.();
-			deps.memoryUserTurnHook?.();
+			state.turnHooks.objective?.();
+			state.turnHooks.memory?.();
 		}
 	});
 

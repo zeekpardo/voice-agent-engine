@@ -174,9 +174,13 @@ export const AgentConfig = z.object({
 						 * deterministic, never waiting for the user. "transfer" nodes
 						 * simulate a warm transfer: optional announcement (in the current
 						 * voice), hold music for a few seconds, then the flow continues at
-						 * the target with a new voice that persists for the rest of the call. */
+						 * the target with a new voice that persists for the rest of the call.
+						 * "handoff" nodes hand the LIVE call off to a DIFFERENT published
+						 * agent (its own persona/flow/tools, fetched from the gateway),
+						 * carrying the conversation context — one-way, no automatic return.
+						 * Terminal for this agent's flow (no normal exits). */
 						kind: z
-							.enum(["agent", "router", "statement", "transfer", "set_field", "modify_tags"])
+							.enum(["agent", "router", "statement", "transfer", "set_field", "modify_tags", "handoff"])
 							.default("agent"),
 						/** Router-only: the statement/question evaluated against the
 						 * conversation (e.g. "The caller has confirmed they speak English"). */
@@ -236,6 +240,16 @@ export const AgentConfig = z.object({
 									.optional(),
 							})
 							.optional(),
+						/**
+						 * handoff-only: the id of the DIFFERENT published agent this node
+						 * hands the live call off to. The worker fetches that agent's current
+						 * config from the gateway, builds its entry agent (its flow.entry, or a
+						 * single-agent build when it has no flow), carries the conversation
+						 * context across, and swaps the session's agent — one-way, no automatic
+						 * return. Opaque to the engine's neutrality rule: just an agent id the
+						 * gateway resolves.
+						 */
+						handoffAgentId: z.string().min(1).optional(),
 						instructions: z.string().min(1),
 						/**
 						 * Conversation mode (Phase 2 — CloseBot's objective-less "keep the
@@ -528,6 +542,20 @@ export const AgentConfig = z.object({
 						ctx.addIssue({
 							code: "custom",
 							message: `statement node "${node.id}" must have at most 1 exit — it speaks its line and moves on (or ends the call)`,
+						});
+					}
+				}
+				if (node.kind === "handoff") {
+					if (!node.handoffAgentId) {
+						ctx.addIssue({
+							code: "custom",
+							message: `handoff node "${node.id}" must define handoffAgentId (the target agent)`,
+						});
+					}
+					if (node.exits.length > 0) {
+						ctx.addIssue({
+							code: "custom",
+							message: `handoff node "${node.id}" must have no exits — it hands the call off to another agent one-way and is terminal for this flow`,
 						});
 					}
 				}

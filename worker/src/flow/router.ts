@@ -43,13 +43,27 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 				node.kind !== "statement" &&
 				node.kind !== "transfer" &&
 				node.kind !== "set_field" &&
-				node.kind !== "modify_tags"
+				node.kind !== "modify_tags" &&
+				node.kind !== "handoff"
 			) {
 				return { kind: "agent", id: current };
 			}
 			if (++hops > 5) {
 				console.error(`flow: node chain exceeded 5 hops at node "${node.id}" — ending call`);
 				return { kind: "end" };
+			}
+
+			if (node.kind === "handoff") {
+				// Hand the live call off to a DIFFERENT published agent (flow/handoff
+				// does the fetch + entry-agent build + session swap). Resolved inline
+				// like transfer: the agent switch can't ride a tool-returned handoff in
+				// a mixed-tool turn, so the caller does the detached swap. Terminal for
+				// this flow (schema-guarded: no exits) — the chain stops here.
+				if (!node.handoffAgentId) {
+					console.error(`flow: handoff node "${node.id}" has no handoffAgentId — ending call`);
+					return { kind: "end" };
+				}
+				return { kind: "handoff", agentId: node.handoffAgentId, fromNode: node.id };
 			}
 
 			if (node.kind === "transfer") {
