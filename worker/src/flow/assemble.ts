@@ -112,6 +112,13 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		: "";
 	const pacingRules =
 		"\n\n## PACING\nThis is a live phone call: ask at most ONE question per reply, then stop and wait for the caller to answer. Never ask a follow-up question in the same reply, never assume or invent an answer the caller has not actually said, and never save a value with a tool unless the caller explicitly provided it. After a tool returns, if you still need information from the caller, ask your single next question and wait.";
+	// Mid-call language alignment, LLM leg (voice only — text portals render the
+	// configured language): unconditional, no config needed. The STT leg lives in
+	// session-lifecycle's language aligner.
+	const languageRules =
+		shared.dispatch.channel !== "text"
+			? "\n\n## LANGUAGE\nAlways reply in the language the caller is currently speaking. If they switch languages mid-conversation, switch with them immediately — same voice, no comment about the change — and stay in the new language until they switch again."
+			: "";
 
 	const missingVars = new Set<string>();
 	collectMissingVars(config.instructions, variables, missingVars);
@@ -126,7 +133,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 			? `\n\n## MISSING CONTEXT\nThese context values were NOT provided for this call: ${[...missingVars].join(", ")}. Their {{placeholders}} may appear in your notes — NEVER say a placeholder token aloud. Speak naturally without the value, and if you genuinely need it (like the caller's name or their property address), simply ask the caller.`
 			: "";
 
-	const instructions = globalInstructions + pacingRules + endCallGuidance + missingNote + prohibited;
+	const instructions = globalInstructions + pacingRules + languageRules + endCallGuidance + missingNote + prohibited;
 
 	const endCallTool = llm.tool({
 		description:
@@ -224,6 +231,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		models,
 		globalInstructions,
 		pacingRules,
+		languageRules,
 		missingNote,
 		prohibited,
 		fieldWriteDef,

@@ -289,6 +289,7 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				"\n\n## CONTINUITY\nThis is ONE continuous conversation. Never greet the caller again or re-introduce yourself after the call has started. Never repeat a question that was already answered — check the conversation before asking. Don't recap earlier answers unless you're confirming a correction. Vary your acknowledgements instead of repeating the same phrase." +
 				"\n\n## IF SOMETHING FAILS\nIf a tool or action fails and you were not given specific wording to say, acknowledge it once briefly, do NOT repeat your last question, and offer to follow up (for example, note that someone will get back to them). Never pretend an action succeeded when it did not." +
 				ctx.pacingRules +
+				ctx.languageRules +
 				(ctx.endCallEnabled
 					? "\n\nOnly the end_call tool ends the call — moving between stages never ends it. Use end_call solely when the conversation is truly over and you've said goodbye."
 					: "") +
