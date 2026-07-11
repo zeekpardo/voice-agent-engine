@@ -232,6 +232,11 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 						exit: exit.name,
 						target: target ?? null,
 					});
+					// Node-result variable (CloseBot "Nodes" Tier 1): an agent/conversation
+					// node's outcome IS the exit it took. Objective nodes record their result
+					// from the objectives tracker instead; a secondary exit taken here still
+					// reflects the real outcome.
+					ctx.recordNodeResult(node.id, { result: exit.name, succeeded: true });
 					return followTarget(target, runCtx);
 				},
 			});
@@ -252,6 +257,8 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 						target: scenario.target,
 						scenario: true,
 					});
+					// Node-result variable (Tier 1): a scenario jump is this node's outcome.
+					ctx.recordNodeResult(node.id, { result: scenario.name, succeeded: true });
 					return followTarget(scenario.target, runCtx);
 				},
 			});
@@ -322,6 +329,9 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 			tools: nodeTools,
 			onEnter: (agentCtx) => {
 				reportEvent(dispatch.callId, "flow.node", { node: node.id, name: node.name ?? null });
+				// Baseline caller-turn count for this node's `attempts` result variable
+				// (CloseBot "Nodes" Tier 1) — computed as the delta when the node completes.
+				ctx.markNodeEntry(node.id);
 				// This node is now live: the transition that led here is complete, so
 				// clear the pending flag (the lastTransitionAt 5s window still covers the
 				// immediate tail). And publish this node's terminality so the shared

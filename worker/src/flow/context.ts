@@ -1,6 +1,7 @@
 import type { JobContext, inference, voice } from "@livekit/agents";
 import { inference as inferenceNs, llm } from "@livekit/agents";
 import type { JSONSchema7 } from "json-schema";
+import { slugify } from "../vendor/slugify.js";
 import type {
 	AgentBundle,
 	AgentConfig,
@@ -23,6 +24,27 @@ import type {
  */
 
 const VAR_RE = /\{\{\s*([\w.-]+)\s*\}\}/g;
+
+/**
+ * Node-result variable naming (CloseBot "Nodes" variables, Tier 1). Each flow
+ * node exposes its runtime outcome as `{{node_<slug>_result|attempts|succeeded}}`
+ * interpolation tokens so LATER nodes can weave a prior node's result into their
+ * prompts / statements / entry messages. Keyed by the node ID (stable across a
+ * title rename), slugged with the SAME transform the SaaS emits (its
+ * `sanitizeExitName`, byte-identical to `slugify`) so the token the picker
+ * inserts matches the token this worker populates exactly. The `slug` charset is
+ * `[a-z0-9_]`, always a subset of the interpolation regex's `[\w.-]`.
+ *
+ * CONTRACT (must stay identical to voiceagent-saas mentions.ts nodeResultVarName):
+ *   node_<slugify(nodeId)>_result     — objective: captured answer(s); agent/
+ *                                        conversation: the exit taken.
+ *   node_<slugify(nodeId)>_attempts   — caller turns spent at the node.
+ *   node_<slugify(nodeId)>_succeeded  — "true" | "false".
+ */
+export type NodeResultSuffix = "result" | "attempts" | "succeeded";
+export function nodeResultVarName(nodeId: string, suffix: NodeResultSuffix): string {
+	return `node_${slugify(nodeId)}_${suffix}`;
+}
 
 /**
  * {{variables}} → values. Unknown placeholders stay visible in MODEL-facing
@@ -315,6 +337,19 @@ export interface FlowRuntimeContext {
 	// interpolation helpers, pre-bound to this call's variables
 	interpolate(template: string): string;
 	interpolateSpoken(template: string): string;
+
+	/**
+	 * Node-result variables (CloseBot "Nodes" Tier 1). Record the baseline caller
+	 * turn count when a node is entered (agent/objective/conversation nodes, via
+	 * buildFlowAgent onEnter) so `attempts` can be computed at completion. */
+	markNodeEntry(nodeId: string): void;
+	/**
+	 * Publish a node's runtime outcome into the shared `variables` map so LATER
+	 * nodes' interpolate() resolves `{{node_<id>_result|attempts|succeeded}}`.
+	 * `attempts` is always (re)written from the caller-turn delta since markNodeEntry.
+	 * Called from the agent-builder exit tools (result = exit name) and from the
+	 * objectives tracker (result = captured answer(s)). */
+	recordNodeResult(nodeId: string, fields: { result?: string; succeeded?: boolean }): void;
 
 	// model/voice builders
 	buildLlm(over?: { model?: string; temperature?: number; maxTokens?: number }): inference.LLM;
