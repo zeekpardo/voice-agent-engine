@@ -159,6 +159,24 @@ export const AgentConfig = z.object({
 	guardrails: z.string().nullish(),
 
 	/**
+	 * Custom variable DEFINITIONS authored in the SaaS builder ("job flow
+	 * variables"): reusable {{name}} placeholders with an optional default. The
+	 * ENGINE never reads these — at dispatch time the consuming SaaS merges
+	 * defaults + its own per-tenant overrides into the runtime `variables` map
+	 * (which the worker already interpolates). Rides on the config so the
+	 * builder round-trips definitions through save/publish/versioning.
+	 */
+	customVariables: z
+		.array(
+			z.object({
+				name: z.string().min(1),
+				description: z.string().optional(),
+				default: z.string().optional(),
+			}),
+		)
+		.optional(),
+
+	/**
 	 * Raw goal text authored in the SaaS builder (the job's overarching
 	 * objective). Compiled into `instructions` (## GOAL) at save time; kept
 	 * separately so re-editing never round-trips the composed prompt.
