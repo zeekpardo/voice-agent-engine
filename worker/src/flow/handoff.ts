@@ -37,6 +37,37 @@ export interface HandoffTarget {
  * the handoff feels deliberate. 0 in the node config disables it entirely. */
 const DEFAULT_HOLD_SECONDS = 3;
 
+/** Cap on waiting for in-flight speech to finish before the hold music — a
+ * stuck playout must not wedge the handoff. */
+const SPEECH_WAIT_CAP_MS = 15_000;
+
+/**
+ * Wait for the speech currently playing on the session (if any) to finish.
+ * Used before starting hold music: the source agent's own transition words —
+ * the reply the model spoke alongside the exit tool call — may still be
+ * playing, and BackgroundAudioPlayer rides a SEPARATE room track that bypasses
+ * the speech queue, so starting music immediately puts it UNDER/BEFORE the
+ * announcement. NOTE: `waitForPlayout()` is not usable here — this detached
+ * chain inherits the exit tool's async context, and awaiting the handle that
+ * owns the still-running tool throws SpeechHandleCircularWaitError — so wait
+ * on done via addDoneCallback (fires immediately for already-done handles).
+ */
+async function waitForCurrentSpeech(session: voice.AgentSession): Promise<void> {
+	const current = session._activity?.currentSpeech;
+	if (!current || current.done()) return;
+	await new Promise<void>((resolve) => {
+		const onDone = (): void => {
+			clearTimeout(timer);
+			resolve();
+		};
+		const timer = setTimeout(() => {
+			current.removeDoneCallback(onDone);
+			resolve();
+		}, SPEECH_WAIT_CAP_MS);
+		current.addDoneCallback(onDone);
+	});
+}
+
 export interface Handoff {
 	/** Start the detached handoff sequence (engine paths: objectives / transfer chain). */
 	startHandoff(target: HandoffTarget): void;
@@ -123,6 +154,9 @@ export function createHandoff(shared: AssembleShared): Handoff {
 				const handle = session.say(spoken, { allowInterruptions: false });
 				await handle.waitForPlayout().catch(() => {});
 			}
+			// Announcement (the configured say above AND/OR the model's own spoken
+			// transition line) fully out BEFORE any music starts.
+			await waitForCurrentSpeech(session);
 			const holdSeconds = Math.max(0, Math.min(30, t?.holdSeconds ?? DEFAULT_HOLD_SECONDS));
 			if (holdSeconds > 0) {
 				try {
@@ -163,11 +197,47 @@ export function createHandoff(shared: AssembleShared): Handoff {
 		// uses — agent-builder passes state.ttsOverride into every agent it
 		// constructs, so this must be set BEFORE assembleAgent builds the target.
 		shared.state.ttsOverride = buildTts(bundle.agent.config.tts);
+
+		// Nudge the target to continue the call in its OWN persona. A flow entry
+		// node's onEnter stays silent (it relies on the call's greeting, which never
+		// re-fires mid-call), so without this the target waits mutely for the caller.
+		// TIMING: this MUST run from the TARGET's onEnter (via entryOnEnter below),
+		// NOT right after session.updateAgent — updateAgent only SCHEDULES the
+		// activity swap, so a generateReply issued immediately after it lands on the
+		// OLD (draining) activity's queue and is dropped (observed live: the
+		// handed-off agent stayed silent until the caller spoke). onEnter runs
+		// inside the NEW activity's startup — the same mechanism non-entry flow
+		// nodes use to open their stage.
+		// Skip when the last thing said is an unanswered agent question — opening
+		// would stack a second question; let the caller answer first.
+		let nudged = false;
+		const entryOnEnter = (): void => {
+			// One-shot: a flow that later loops back into its entry node re-enters
+			// it, and that re-entry must stay silent (pre-handoff semantics).
+			if (nudged) return;
+			nudged = true;
+			const sess = shared.state.session;
+			if (!sess || shared.state.completed) return;
+			const lastSpoken = shared.turns.filter((t) => t.role !== "system").at(-1);
+			if (lastSpoken?.role === "agent" && lastSpoken.text.trim().endsWith("?")) {
+				reportEvent(callId, "flow.handoff_silent", {
+					toAgentId: bundle.agent.id,
+					pending_question: lastSpoken.text.slice(0, 200),
+				});
+				return;
+			}
+			sess.generateReply({
+				instructions:
+					"You have just taken over this same ongoing call. Continue it in your own role — no greeting, no re-introduction, no recap of what was already covered. Move naturally to your first point or question.",
+			});
+		};
+
 		const assembled = assembleAgent(shared, {
 			bundle,
 			dispatch: targetDispatch,
 			handoff: controller,
 			entryChatCtx: nextCtx,
+			entryOnEnter,
 		});
 
 		// Swap the per-caller-turn hooks to the TARGET's trackers BEFORE the agent,
@@ -177,24 +247,6 @@ export function createHandoff(shared: AssembleShared): Handoff {
 		shared.state.turnHooks.memory = assembled.memoryUserTurnHook;
 		session.updateAgent(assembled.agent);
 		inFlight = false;
-
-		// Nudge the target to continue the call in its OWN persona. A flow entry
-		// node's onEnter stays silent (it relies on the call's greeting, which never
-		// re-fires mid-call), so without this the target waits mutely for the caller.
-		// Skip when the last thing said is an unanswered agent question — opening
-		// would stack a second question; let the caller answer first.
-		const lastSpoken = shared.turns.filter((t) => t.role !== "system").at(-1);
-		if (lastSpoken?.role === "agent" && lastSpoken.text.trim().endsWith("?")) {
-			reportEvent(callId, "flow.handoff_silent", {
-				toAgentId: bundle.agent.id,
-				pending_question: lastSpoken.text.slice(0, 200),
-			});
-			return;
-		}
-		session.generateReply({
-			instructions:
-				"You have just taken over this same ongoing call. Continue it in your own role — no greeting, no re-introduction, no recap of what was already covered. Move naturally to your first point or question.",
-		});
 	};
 
 	const controller: Handoff = {
