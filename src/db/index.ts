@@ -243,6 +243,62 @@ const MIGRATIONS: { version: number; name: string; up: string }[] = [
 			ON calls(project, group_ref) WHERE status = 'active';
 		`,
 	},
+	{
+		version: 9,
+		name: "conversations",
+		// Room-less, turn-based text conversations (Wave 1b). A conversation is the
+		// async, one-turn-at-a-time analogue of a call: state lives here in Postgres
+		// (no LiveKit room, no worker), and each inbound message runs ONE gateway-side
+		// agent turn. `node_id` is the current flow position (NULL for single-agent
+		// configs); `state` JSONB holds objective progress, rolling summary, variables,
+		// contactState, contactTags, turn count, and a usage aggregate. `external_ref`
+		// is an OPAQUE consumer key (e.g. a CRM conversation id) — UNIQUE per project
+		// when set, so the consuming SaaS can resolve its own conversation by it.
+		up: `
+		CREATE TABLE IF NOT EXISTS conversations (
+			id            TEXT PRIMARY KEY,
+			project       TEXT NOT NULL,
+			agent_id      TEXT NOT NULL REFERENCES agents(id),
+			agent_version INTEGER NOT NULL,
+			group_ref     TEXT,
+			status        TEXT NOT NULL DEFAULT 'active',   -- active | ended
+			node_id       TEXT,
+			state         JSONB NOT NULL DEFAULT '{}',
+			external_ref  TEXT,
+			metadata      JSONB NOT NULL DEFAULT '{}',
+			created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+		);
+		CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project, created_at);
+		CREATE INDEX IF NOT EXISTS idx_conversations_agent   ON conversations(agent_id, created_at);
+		-- external_ref is unique WITHIN a project, but only when set.
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_external_ref
+			ON conversations(project, external_ref) WHERE external_ref IS NOT NULL;
+
+		CREATE TABLE IF NOT EXISTS conversation_messages (
+			id              TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL REFERENCES conversations(id),
+			role            TEXT NOT NULL,   -- user | agent | system
+			text            TEXT NOT NULL,
+			created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+		);
+		CREATE INDEX IF NOT EXISTS idx_conversation_messages
+			ON conversation_messages(conversation_id, created_at);
+
+		-- Parallel to call_events: call_events.call_id has a FK to calls(id), so a
+		-- conversation id can't reuse it. A sibling table is the smaller change than
+		-- dropping that FK. Same shape (id, ref, type, payload, created_at).
+		CREATE TABLE IF NOT EXISTS conversation_events (
+			id              TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL REFERENCES conversations(id),
+			type            TEXT NOT NULL,
+			payload         JSONB NOT NULL DEFAULT '{}',
+			created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+		);
+		CREATE INDEX IF NOT EXISTS idx_conversation_events
+			ON conversation_events(conversation_id, created_at);
+		`,
+	},
 ];
 
 /** Apply pending migrations on boot. */
