@@ -334,6 +334,10 @@ export interface FlowRuntimeContext {
 	/** Text-only "don't read back typed values character by character" rule (empty
 	 * on voice, where read-back confirmation of critical fields is correct). */
 	textRules: string;
+	/** Per-agent phrasing/tone directive (`## RESPONSE STYLE` block), empty when
+	 * the agent sets no responseStyle. Inherited by every node so all generation
+	 * follows it. */
+	responseStyle: string;
 	missingNote: string;
 	prohibited: string;
 

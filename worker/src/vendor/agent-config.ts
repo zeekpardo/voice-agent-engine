@@ -36,6 +36,16 @@ export const AgentConfig = z.object({
 
 	// Persona — the ONLY place vertical behavior lives as language
 	instructions: z.string().min(1),
+	/**
+	 * Free-text phrasing/tone directive injected into EVERY generated message
+	 * (voice + text, every node, statements/handoff/greeter/entry generation) as
+	 * a labeled `## RESPONSE STYLE` block, alongside persona/guardrails. Distinct
+	 * from persona (identity/character): this governs HOW replies are phrased —
+	 * varied, natural, non-repetitive. When empty/unset the engine injects
+	 * nothing (behavior unchanged). Read LIVE by the worker at assembly time
+	 * (unlike guardrails/goal, which the SaaS compiles into `instructions`).
+	 */
+	responseStyle: z.string().optional(),
 	greeting: z.string().optional(), // spoken first on inbound; omit → agent waits
 	/** When absent/false (default): the greeting is spoken VERBATIM (with
 	 * {{variable}} substitution) exactly as authored. When true: the greeting
