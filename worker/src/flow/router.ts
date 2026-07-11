@@ -165,8 +165,20 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 					node: node.id,
 					name: node.name ?? null,
 					kind: "statement",
+					generate: node.statement?.generate === true,
 				});
-				const handle = ctx.session.say(ctx.interpolateSpoken(node.statement?.say ?? ""));
+				const say = node.statement?.say ?? "";
+				// generate=true: treat `say` as a DIRECTION and have the model produce a
+				// fresh, natural message from it — the SAME generateReply-from-direction
+				// path entry/handoff opening lines use, so the caller-language rule and
+				// the live agent's persona/style already baked into the session apply.
+				// generate absent/false (the default): speak/send VERBATIM, unchanged.
+				const handle =
+					node.statement?.generate === true
+						? ctx.session.generateReply({
+								instructions: `Deliver this to the caller now as a natural, spoken message in your own words — vary the phrasing so it never sounds scripted or recited, and speak in the language the caller is currently using. Do NOT greet, recap, or re-introduce yourself; just deliver this: ${ctx.interpolate(say)}`,
+							})
+						: ctx.session.say(ctx.interpolateSpoken(say));
 				const exit = node.exits[0];
 				reportEvent(dispatch.callId, "flow.exit", {
 					node: node.id,

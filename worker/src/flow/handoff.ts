@@ -30,7 +30,7 @@ export interface HandoffTarget {
 	fromNode: string;
 	/** The node's optional transition moment: announcement (spoken in the
 	 * SOURCE agent's voice) + hold music before the swap. */
-	transition?: { say?: string; holdSeconds?: number };
+	transition?: { say?: string; generate?: boolean; holdSeconds?: number };
 }
 
 /** Hold music to play when the node doesn't set holdSeconds — a short beat so
@@ -147,11 +147,20 @@ export function createHandoff(shared: AssembleShared): Handoff {
 		if (shared.dispatch.channel !== "text") {
 			const t = target.transition;
 			if (t?.say) {
-				const spoken = t.say.replace(
-					/\{\{\s*([\w.]+)\s*\}\}/g,
-					(_, key: string) => shared.variables[key] ?? "",
-				);
-				const handle = session.say(spoken, { allowInterruptions: false });
+				// generate=true: the SOURCE agent's model speaks a fresh announcement
+				// from `say`-as-direction (caller-language + persona/style already in the
+				// current session) — the same generateReply-from-direction path
+				// statements/greetings use. Absent/false (default): spoken VERBATIM.
+				const handle =
+					t.generate === true
+						? session.generateReply({
+								instructions: `Tell the caller now, in ONE short natural sentence and in the language they are currently using, that you're connecting/transferring them — vary the phrasing so it never sounds scripted. Do this based on: ${interpolate(t.say, shared.variables)}`,
+								allowInterruptions: false,
+							})
+						: session.say(
+								t.say.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key: string) => shared.variables[key] ?? ""),
+								{ allowInterruptions: false },
+							);
 				await handle.waitForPlayout().catch(() => {});
 			}
 			// Announcement (the configured say above AND/OR the model's own spoken

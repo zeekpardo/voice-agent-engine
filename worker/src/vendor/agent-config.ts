@@ -37,6 +37,12 @@ export const AgentConfig = z.object({
 	// Persona — the ONLY place vertical behavior lives as language
 	instructions: z.string().min(1),
 	greeting: z.string().optional(), // spoken first on inbound; omit → agent waits
+	/** When absent/false (default): the greeting is spoken VERBATIM (with
+	 * {{variable}} substitution) exactly as authored. When true: the greeting
+	 * text is a DIRECTION the model generates a fresh opener from each call —
+	 * adapted to the caller's language + the agent's persona/style — via the same
+	 * generateReply-from-direction path statements/handoffs use. */
+	greetingGenerate: z.boolean().optional(),
 	language: z.string().default("en"), // BCP-47
 	fallbackLanguage: z.string().optional(),
 
@@ -231,8 +237,15 @@ export const AgentConfig = z.object({
 						/** Router-only: the statement/question evaluated against the
 						 * conversation (e.g. "The caller has confirmed they speak English"). */
 						router: z.object({ condition: z.string().min(1) }).optional(),
-						/** Statement-only: the exact line spoken ({{variables}} interpolated). */
-						statement: z.object({ say: z.string().min(1) }).optional(),
+						/** Statement-only: the line to deliver ({{variables}} interpolated).
+						 * When `generate` is absent/false (the default) `say` is spoken/sent
+						 * VERBATIM — exactly as written. When `generate` is true, `say` is
+						 * treated as a DIRECTION/seed: the model generates a fresh, natural
+						 * message from it each time (adapted to the caller's current language +
+						 * the agent's persona/style) via the same generateReply-from-direction
+						 * path that entry/handoff messages use, instead of reciting the literal
+						 * string. */
+						statement: z.object({ say: z.string().min(1), generate: z.boolean().optional() }).optional(),
 						/**
 						 * set_field-only: deterministically write one data field.
 						 *
@@ -344,6 +357,13 @@ export const AgentConfig = z.object({
 						handoff: z
 							.object({
 								say: z.string().optional(),
+								/** When absent/false (default): `say` is the announcement spoken
+								 * VERBATIM in the SOURCE agent's voice. When true: `say` is a
+								 * DIRECTION the SOURCE agent's model speaks a fresh, natural
+								 * announcement from — in the caller's current language +
+								 * persona/style — via the same generateReply-from-direction path
+								 * statements/greetings use. */
+								generate: z.boolean().optional(),
 								holdSeconds: z.number().min(0).max(30).optional(),
 							})
 							.optional(),

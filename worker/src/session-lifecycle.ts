@@ -396,6 +396,9 @@ export interface SessionLifecycleDeps {
 	state: FlowRuntimeState;
 	agent: voice.Agent;
 	greeting?: string;
+	/** When true, `greeting` is a DIRECTION the model generates the opener from
+	 * (via generateReply) rather than a verbatim line spoken via say. */
+	greetingGenerate?: boolean;
 	/** Inbound SIP jobs skip the call.started event (already reported upstream). */
 	isInbound: boolean;
 	/** Session channel (Phase 6): selects the I/O adapter. Defaults to voice. */
@@ -640,10 +643,23 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	// session.say commits the message to chat context and emits a
 	// ConversationItemAdded on both channels: voice speaks it via TTS; text has
 	// no audio output, so the message rides the lk.chat egress (emitAgentTurn).
-	const opening: string[] = [];
-	if (config.compliance.aiDisclosure) {
-		opening.push(config.compliance.disclosureText ?? DEFAULT_DISCLOSURE);
+	const disclosure = config.compliance.aiDisclosure
+		? (config.compliance.disclosureText ?? DEFAULT_DISCLOSURE)
+		: undefined;
+	if (greeting && deps.greetingGenerate) {
+		// generate=true: the disclosure (a compliance string) stays VERBATIM, then
+		// the model opens with a fresh greeting generated from the DIRECTION — the
+		// same generateReply-from-direction path statements/handoffs use, so the
+		// agent's persona/style + language rules apply.
+		if (disclosure) session.say(disclosure);
+		session.generateReply({
+			instructions: `Open the call now: greet the caller warmly in ONE short, natural spoken sentence, varying the phrasing so it never sounds scripted. Base your greeting on this direction: ${greeting}`,
+		});
+	} else {
+		// Verbatim (default): disclosure + greeting spoken exactly as authored.
+		const opening: string[] = [];
+		if (disclosure) opening.push(disclosure);
+		if (greeting) opening.push(greeting);
+		if (opening.length > 0) session.say(opening.join(" "));
 	}
-	if (greeting) opening.push(greeting);
-	if (opening.length > 0) session.say(opening.join(" "));
 }
