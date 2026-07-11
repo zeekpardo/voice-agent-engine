@@ -24,7 +24,9 @@ export interface AgentBuilder {
 
 export interface AgentBuilderDeps {
 	resolveTarget(target: string | undefined): Promise<ResolvedTarget>;
-	runTransfer(nodeId: string): never;
+	/** simulated/cold: ends the LLM turn (throws StopResponse). warm: resolves
+	 * with a result string once the attended transfer merges the parties. */
+	runTransfer(nodeId: string): Promise<string>;
 	/** Exit-tool entry into an agent-handoff (flow `handoff` node): start the
 	 * detached fetch+swap sequence, then end the LLM turn with no reply. */
 	runHandoff(target: { agentId: string; fromNode: string }): never;

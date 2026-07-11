@@ -223,14 +223,44 @@ export const AgentConfig = z.object({
 								toolId: z.string().min(1).optional(),
 							})
 							.optional(),
-						/** Transfer-only: the simulated hand-off. */
+						/**
+						 * Transfer-only: hand the caller off to another party. One node,
+						 * three modes:
+						 *
+						 * - "simulated" (DEFAULT — legacy behavior): NO real phone dial. The
+						 *   agent speaks an optional announcement in the current voice, plays
+						 *   hold music for `holdSeconds`, applies `voice`, then continues the
+						 *   flow at the exit target — all within the same call/session. Works
+						 *   with no SIP trunk. Existing transfer nodes (which carry no `mode`)
+						 *   default here and keep behaving exactly as before.
+						 * - "warm": REAL attended transfer. The agent dials `target` over SIP,
+						 *   the caller hears hold music while it rings, then the two calls are
+						 *   merged. Backed by LiveKit's WarmTransferTask. Requires a SIP
+						 *   outbound trunk (LIVEKIT_SIP_OUTBOUND_TRUNK on the worker).
+						 * - "cold": REAL blind transfer / call forwarding via SIP REFER. The
+						 *   caller's SIP leg is transferred to `target` and the agent drops;
+						 *   the LiveKit session ends. Requires a SIP trunk that permits REFER.
+						 */
 						transfer: z
 							.object({
+								/** Which transfer behavior to run. Default keeps old configs unchanged. */
+								mode: z.enum(["simulated", "warm", "cold"]).default("simulated"),
+								/**
+								 * warm/cold destination: a dialable phone (`tel:+15551234567`) or
+								 * SIP URI (`sip:agent@host`). Generic URI — the engine assigns it
+								 * no business meaning. Required for warm/cold; ignored by simulated.
+								 */
+								target: z.string().min(1).optional(),
+								/**
+								 * warm-only ring/hold timeout in seconds: how long to wait for
+								 * `target` to answer before giving up. Sensible default + cap.
+								 */
+								waitSeconds: z.number().min(1).max(120).default(30),
 								/** Announcement spoken before the music, in the pre-transfer voice. */
 								say: z.string().optional(),
-								/** Hold-music duration between the two "people". */
+								/** simulated-only: hold-music duration between the two "people". */
 								holdSeconds: z.number().min(0).max(30).default(4),
-								/** Voice from here on; omit to keep the current voice. */
+								/** simulated-only: voice from here on; omit to keep the current voice. */
 								voice: z
 									.object({
 										provider: z.string(),
