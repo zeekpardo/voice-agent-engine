@@ -211,7 +211,7 @@ const judgeMaxTokens = (objectiveCount: number): number => Math.max(800, objecti
  * objective is marked skipped so the node can still advance. */
 const DEFAULT_MAX_ATTEMPTS = 3;
 const OBJECTIVE_JUDGE_SYSTEM =
-	'You evaluate whether data-collection objectives for a phone call have been satisfied by the conversation so far. Respond with ONLY a JSON object — no prose, no code fences — of the form {"checks":[{"key":"<objective key>","rating":<0-100>,"answer":"<extracted value or empty string>"}]}. Objectives come in two groups. For each objective under "To collect" include exactly one check. For each objective under "Already answered" include a check ONLY if the caller has since stated a DIFFERENT value than its recorded answer — return the new value with your confidence; do not re-report an unchanged answer. rating is your confidence that the CALLER explicitly provided the information (100 = clearly provided, 0 = not provided at all). Extract answer from what the caller actually said. NEVER invent or assume a value the caller did not state; if the information was not provided, rating must be low and answer empty. When an objective lists allowed values, answer must be exactly one of them, chosen from what the caller said. Some objectives are CONDITIONAL ("if X, …"): when the conversation clearly shows the condition does NOT apply, the objective is satisfied — rate it 100 with answer "N/A".';
+	'You evaluate whether data-collection objectives for a phone call have been satisfied by the conversation so far. Respond with ONLY a JSON object — no prose, no code fences — of the form {"checks":[{"key":"<objective key>","rating":<0-100>,"answer":"<extracted value or empty string>"}]}. Objectives come in two groups. For each objective under "To collect" include exactly one check. For each objective under "Already answered" include a check ONLY if the caller has since stated a DIFFERENT value than its recorded answer — return the new value with your confidence; do not re-report an unchanged answer. rating is your confidence that the CALLER explicitly provided the information (100 = clearly provided, 0 = not provided at all). Extract answer from what the caller actually said. NEVER invent or assume a value the caller did not state; if the information was not provided, rating must be low and answer empty. When an objective lists allowed values, answer must be exactly one of them, chosen from what the caller said — and the agent will usually LIST those options in its own question, which is NOT an answer: only count a listed-value objective as provided when the CALLER picks one, never extract it from the agent\'s own wording. Callers often speak emails and phone numbers phonetically — e.g. "count at gmail dot com" for count@gmail.com, or a number read out digit by digit — treat these as clearly provided (rate them high) and extract the value in normal written form (name@domain.com, a plain digit string). Some objectives are CONDITIONAL ("if X, …"): when the conversation clearly shows the condition does NOT apply, the objective is satisfied — rate it 100 with answer "N/A".';
 
 /**
  * Structured-output contract for the judge (audit Tier 1 #6). The judge must
@@ -236,6 +236,53 @@ const JUDGE_CORRECTIVE = "Your last reply was not valid JSON matching the schema
 /** Case- and whitespace-insensitive key for comparing a caller's corrected
  * answer against the recorded one (the material-change / duplicate-write guard). */
 const answerKey = (s: string): string => s.trim().replace(/\s+/g, " ").toLowerCase();
+
+/**
+ * Spoken-form normalization for captured objective answers. Voice STT renders
+ * emails and phone numbers phonetically ("count at gmail dot com", "1 5 6. 3 2 1"),
+ * which is never a storable value and (for email) blocks the judge from validating
+ * it. Detected by the objective's target field key (or its own key). This is GENERIC
+ * transcription cleanup — NO CRM/business field mapping (that lives in the SaaS
+ * layer); it only tidies the shape of what the caller literally said.
+ */
+const isEmailObjective = (o: FlowObjective): boolean => /email/i.test(o.field ?? o.key ?? "");
+const isPhoneObjective = (o: FlowObjective): boolean => /phone|mobile/i.test(o.field ?? o.key ?? "");
+
+/** "count at gmail dot com" → "count@gmail.com". Lowercase, spoken separators to
+ * symbols, common domain read-outs joined, spaces stripped. */
+const normalizeSpokenEmail = (raw: string): string => {
+	let s = raw.trim().toLowerCase();
+	// Spoken separators → symbols (handle " at "/" dot " before stripping spaces).
+	s = s.replace(/\s+at\s+/g, "@").replace(/\s+dot\s+/g, ".");
+	// Common provider read-outs said with a gap.
+	s = s.replace(/\bg\s*mail\b/g, "gmail").replace(/\bhot\s*mail\b/g, "hotmail").replace(/\by\s*ahoo\b/g, "yahoo");
+	// Drop punctuation the model may echo and collapse all remaining whitespace.
+	s = s.replace(/[()<>,;]/g, "").replace(/\s+/g, "");
+	// A trailing sentence period ("…dot com.") is not part of the address.
+	s = s.replace(/\.+$/, "");
+	return s;
+};
+
+/** Strip spaces and dial punctuation to a clean digit string; preserve a leading +. */
+const normalizePhone = (raw: string): string => {
+	const trimmed = raw.trim();
+	const plus = trimmed.startsWith("+") ? "+" : "";
+	return plus + trimmed.replace(/\D/g, "");
+};
+
+/** Normalize a judge-extracted answer by the objective's field kind. Email is
+ * validated to look like an address (falls back to the raw trimmed value if the
+ * normalized form doesn't); everything non-email/phone passes through unchanged. */
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const normalizeObjectiveAnswer = (o: FlowObjective, answer: string): string => {
+	if (!answer) return answer;
+	if (isEmailObjective(o)) {
+		const email = normalizeSpokenEmail(answer);
+		return EMAIL_SHAPE.test(email) ? email : answer.trim();
+	}
+	if (isPhoneObjective(o)) return normalizePhone(answer);
+	return answer;
+};
 
 /**
  * Idle = agent finished speaking its current reply. Bounded: a stuck state
@@ -554,7 +601,15 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			const progress = rt.state.get(objective.key);
 			if (!progress) continue;
 			const rating = Number(check.rating ?? 0);
-			const answer = typeof check.answer === "string" ? check.answer.trim() : "";
+			// Normalize spoken email/phone forms BEFORE storing or writing, so both the
+			// recorded answer and the field write are clean ("count at gmail dot com" →
+			// count@gmail.com, "1 5 6. 3 2 1" → 156321). Covers first-time capture AND
+			// corrections below (both read `answer`); picklist option matching is
+			// unaffected (email/phone objectives carry no options).
+			const answer = normalizeObjectiveAnswer(
+				objective,
+				typeof check.answer === "string" ? check.answer.trim() : "",
+			);
 
 			if (progress.met) {
 				// --- Correction of an already-met objective ---
