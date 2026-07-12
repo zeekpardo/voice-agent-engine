@@ -15,6 +15,28 @@ import { reportEvent } from "./gateway.js";
 
 export const AI_LOG_CAP = 16_384;
 
+/**
+ * Derive the API provider label from a resolved model id. Roles now run on
+ * different providers (OpenAI judge/summary/router, xAI/Anthropic respond, …),
+ * so the `ai.turn` badge must reflect the model that actually ran rather than a
+ * single hardcoded runtime. Namespaced ids (`openai/gpt-4o-mini`) and bare ids
+ * (`gpt-4o-mini`, `grok-4-fast`, `claude-sonnet-5`) are both recognized.
+ */
+export function providerFromModel(model: string | null): string {
+	if (!model) return "Unknown";
+	const m = model.toLowerCase();
+	if (m.startsWith("openai/") || /^(gpt-|o1|o3)/.test(m)) return "OpenAI";
+	if (m.startsWith("xai/") || m.startsWith("grok")) return "xAI";
+	if (m.startsWith("claude") || m.startsWith("anthropic")) return "Anthropic";
+	if (m.startsWith("google/") || m.startsWith("gemini")) return "Google";
+	if (m.startsWith("deepseek")) return "DeepSeek";
+	if (m.startsWith("moonshot") || m.startsWith("kimi")) return "Moonshot";
+	if (m.startsWith("zai") || m.startsWith("glm")) return "Z.ai";
+	const slash = model.indexOf("/");
+	if (slash > 0) return model.charAt(0).toUpperCase() + model.slice(1, slash);
+	return "Unknown";
+}
+
 export function capText(text: string): { text: string; truncated: boolean } {
 	if (text.length <= AI_LOG_CAP) return { text, truncated: false };
 	return { text: `${text.slice(0, AI_LOG_CAP)}… [truncated]`, truncated: true };
@@ -78,7 +100,7 @@ export function reportAiTurn(callId: string, log: AiTurnLog): void {
 	reportEvent(callId, "ai.turn", {
 		class: log.class,
 		title: log.title,
-		provider: "livekit-inference",
+		provider: providerFromModel(log.model),
 		model: log.model,
 		prompt_tokens: log.promptTokens,
 		completion_tokens: log.completionTokens,

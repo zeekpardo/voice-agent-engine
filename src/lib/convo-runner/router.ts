@@ -1,6 +1,7 @@
 import { interpolate } from "@voice-engine/shared/agent-config";
 import { env } from "../../env.js";
-import { chatComplete, openaiComplete } from "../llm.js";
+import { type ChatMessage, chatComplete, openaiComplete } from "../llm.js";
+import { aiTurnEvent, providerFromModel } from "./ai-log.js";
 import { resolveToolDef } from "./tools.js";
 import { invokeWriteTool } from "./tools.js";
 import { type ResolvedTarget, recordUsage, type TurnContext } from "./types.js";
@@ -111,6 +112,19 @@ export async function resolveTarget(ctx: TurnContext, targetId: string | undefin
 
 		let chosen = fallbackExit;
 		let decision = "";
+		const routerMessages: ChatMessage[] = [
+			{
+				role: "system",
+				content:
+					"You are routing a conversation. Given the transcript, evaluate the statement/question and answer with EXACTLY one option name from the list — the option name only, nothing else.",
+			},
+			{
+				role: "user",
+				content: `Statement/question: ${node.router?.condition ?? ""}\n\nOptions:\n${routableExits
+					.map((e) => `- ${e.name}: ${e.description}`)
+					.join("\n")}\n\nConversation transcript:\n${transcript}`,
+			},
+		];
 		// Router model selection, mirroring the judge/summary precedence (judge.ts,
 		// memory.ts): an explicit override (node.llm.model, then config.models.router)
 		// always wins; otherwise prefer OpenAI's cheap mini tier (OPENAI_ROUTER_MODEL)
@@ -124,21 +138,22 @@ export async function resolveTarget(ctx: TurnContext, targetId: string | undefin
 				model: routerModel,
 				temperature: node.llm?.temperature ?? 0,
 				maxTokens: 20,
-				messages: [
-					{
-						role: "system",
-						content:
-							"You are routing a conversation. Given the transcript, evaluate the statement/question and answer with EXACTLY one option name from the list — the option name only, nothing else.",
-					},
-					{
-						role: "user",
-						content: `Statement/question: ${node.router?.condition ?? ""}\n\nOptions:\n${routableExits
-							.map((e) => `- ${e.name}: ${e.description}`)
-							.join("\n")}\n\nConversation transcript:\n${transcript}`,
-					},
-				],
+				messages: routerMessages,
 			});
 			recordUsage(ctx.state, "router", res.usage.promptTokens, res.usage.completionTokens);
+			ctx.events.push(
+				aiTurnEvent({
+					cls: "router",
+					title: "Routing",
+					provider: useOpenAI ? "OpenAI" : providerFromModel(routerModel),
+					model: routerModel,
+					promptTokens: res.usage.promptTokens,
+					completionTokens: res.usage.completionTokens,
+					request: routerMessages,
+					response: res.text,
+					node: node.id,
+				}),
+			);
 			decision = res.text.trim();
 			chosen = matchExit(decision) ?? fallbackExit;
 		} catch (err) {
