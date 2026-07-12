@@ -99,8 +99,10 @@ export const AgentConfig = z.object({
 
 	/**
 	 * Audio experience (VOICE channel only — text sessions ignore this block).
-	 * Both toggles default ON: they are kill switches, not opt-ins, so existing
-	 * configs get the improved behavior automatically.
+	 * The two toggles default ON (kill switches, not opt-ins) so existing configs
+	 * get the improved behavior automatically; the thinking-sound clip/volume and
+	 * the optional continuous ambient bed are additive extensions whose defaults
+	 * reproduce the prior hard-coded behavior byte-for-byte.
 	 */
 	audio: z
 		.object({
@@ -116,6 +118,25 @@ export const AgentConfig = z.object({
 			 * (SDK BackgroundAudioPlayer.thinkingSound, driven by the agent-state
 			 * machine), so slow LLM/tool turns aren't dead air. Set false to disable. */
 			thinkingSound: z.boolean().default(true),
+			/** Which built-in clip the thinking sound uses. Defaults to keyboard_typing2
+			 * — byte-for-byte the previous hard-coded behavior. */
+			thinkingSoundClip: z
+				.enum(["keyboard_typing", "keyboard_typing2", "office_ambience", "hold_music"])
+				.default("keyboard_typing2"),
+			/** Thinking-sound loudness (0–1). Default 0.4 preserves prior behavior. */
+			thinkingSoundVolume: z.number().min(0).max(1).default(0.4),
+			/** Continuous ambient bed played for the whole call (SDK
+			 * BackgroundAudioPlayer.ambientSound). OFF by default — opt-in, so existing
+			 * configs are unchanged. */
+			ambientSound: z
+				.object({
+					enabled: z.boolean().default(false),
+					clip: z
+						.enum(["office_ambience", "keyboard_typing", "keyboard_typing2", "hold_music"])
+						.default("office_ambience"),
+					volume: z.number().min(0).max(1).default(0.3),
+				})
+				.default({}),
 		})
 		.default({}),
 
