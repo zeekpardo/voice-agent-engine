@@ -375,7 +375,7 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				wrapUpBlock +
 				(!isTerminalNode ? ctx.noEarlyWrapUp : "") +
 				(!isConversation && toolExits.length > 0
-					? `\n\n## MOVING BETWEEN STAGES\nThis call flows through several stages and you handle ONLY this one. The moment the conversation satisfies an exit condition, call that exit tool (${exitNames}) IMMEDIATELY and SILENTLY. Changing stages is invisible to the caller: do NOT wrap up, do NOT say goodbye or "thanks for your time", do NOT announce a transfer or say you're passing them along — the very same voice simply continues the conversation. When this stage's goal is met, move on to the next stage — never close the call or ask if there's "anything else" while any stage remains.`
+					? `\n\n## MOVING BETWEEN STAGES\nThis call flows through several stages and you handle ONLY this one. The moment the conversation satisfies an exit condition, call that exit tool (${exitNames}) IMMEDIATELY and SILENTLY. Changing stages is INVISIBLE to the caller: do NOT wrap up, do NOT say goodbye or "thanks for your time", do NOT announce a transfer or say you're passing them along, and do NOT narrate the move — never say "let me check what's next", "let me move on / to the next step", "let's move forward", "moving on", or "that wraps up this part". The very same voice simply asks the next question as if it were the natural next thing to say. Never close the call or ask if there's "anything else" while any stage remains.`
 					: "") +
 				(scenarios.length > 0
 					? `\n\n## SCENARIOS\nThese scenario exits override your stage goal — call one the moment its condition appears: ${scenarios
@@ -494,7 +494,7 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 					}
 					agentCtx.session.generateReply({
 						instructions:
-							"Continue this same conversation mid-stream — no greeting, no re-introduction, no recap of what was already covered. " +
+							"Continue this same conversation mid-stream — no greeting, no re-introduction, no recap of what was already covered, and NO transition narration (never say \"let me check what's next\", \"let me move on / to the next step\", or \"that wraps up this part\"). Just ask the question directly as a natural continuation. " +
 							(node.entryInstructions
 								? ctx.interpolate(node.entryInstructions)
 								: "Move naturally to this stage's first question."),
