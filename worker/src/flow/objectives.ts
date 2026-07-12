@@ -37,6 +37,12 @@ export type ResolvedTarget =
 	| { kind: "agent"; id: string }
 	| { kind: "end" }
 	| { kind: "end_after_speech" }
+	/** A `stop_responding` node: PARK the contact. The current agent is swapped
+	 * for a parked agent that stays silent (never speaks/hangs up) but keeps
+	 * evaluating global scenarios each inbound turn, so a scenario can still move
+	 * the contact onward. Voice calls still end via the existing silence timeout;
+	 * text sessions park indefinitely. Handled by flow/agent-builder's parked agent. */
+	| { kind: "park"; nodeId: string }
 	| { kind: "transfer"; nodeId: string }
 	/** A `handoff` node: hand the live call to a DIFFERENT published agent
 	 * (target agent id resolved to `agentId`, from the source flow `fromNode`).
@@ -114,6 +120,9 @@ export interface ObjectivesDeps {
 	/** Builds (or rebuilds) the voice.Agent for a flow node, carrying over
 	 * chat context. Owned by main.ts's flow branch. */
 	buildFlowAgent: (nodeId: string, chatCtx?: llm.ChatContext) => voice.Agent;
+	/** Builds the silent parked agent for a `stop_responding` (park) node — used
+	 * when an objective node's primary exit routes onto a stop_responding node. */
+	buildParkedAgent: (chatCtx?: llm.ChatContext) => voice.Agent;
 	/** Starts a simulated warm-transfer sequence for a transfer node. */
 	startTransfer: (nodeId: string) => void;
 	/** Starts an agent-handoff sequence (flow `handoff` node): fetch the target
@@ -218,7 +227,7 @@ function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promi
 }
 
 export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
-	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, startTransfer, startHandoff, hangUp, isCompleted, setTransitionPending, judgeModel, recordUsage, recordNodeResult } =
+	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, buildParkedAgent, startTransfer, startHandoff, hangUp, isCompleted, setTransitionPending, judgeModel, recordUsage, recordNodeResult } =
 		deps;
 	// `session` is a LAZY getter on deps (the AgentSession is built after this
 	// factory wires up) — it MUST be read fresh via deps.session at call time.
@@ -586,6 +595,12 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			if (resolved.kind === "agent") {
 				const nextCtx = session.currentAgent.chatCtx.copy({ excludeInstructions: true });
 				session.updateAgent(buildFlowAgent(resolved.id, nextCtx));
+			} else if (resolved.kind === "park") {
+				// Objective node's exit lands on a stop_responding node: park the
+				// contact. The parked agent stays silent but keeps evaluating
+				// scenarios; it never hangs up (voice ends via the silence timeout).
+				const nextCtx = session.currentAgent.chatCtx.copy({ excludeInstructions: true });
+				session.updateAgent(buildParkedAgent(nextCtx));
 			} else if (resolved.kind === "end") {
 				await hangUp("flow_complete");
 			} else if (resolved.kind === "transfer") {

@@ -321,14 +321,17 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 	const { startTransfer, runTransfer } = createTransfer(flowCtx, {
 		resolveTarget,
 		buildFlowAgent: (id, chatCtx) => buildFlowAgent(id, chatCtx),
+		buildParkedAgent: (chatCtx) => buildParkedAgent(chatCtx),
 		startHandoff: handoff.startHandoff,
 	});
-	const { buildFlowAgent } = createAgentBuilder(flowCtx, {
+	const { buildFlowAgent, buildParkedAgent } = createAgentBuilder(flowCtx, {
 		resolveTarget,
 		runTransfer,
 		runHandoff: handoff.runHandoff,
 		getObjectivesTracker: () => objectivesTracker,
 		entryOnEnter,
+		startTransfer,
+		startHandoff: handoff.startHandoff,
 	});
 	objectivesTracker = createObjectivesTracker({
 		dispatch,
@@ -341,6 +344,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		fieldWriteDef,
 		resolveTarget,
 		buildFlowAgent,
+		buildParkedAgent,
 		startTransfer,
 		startHandoff: handoff.startHandoff,
 		hangUp: (reason: string) => state.hangUp(reason),

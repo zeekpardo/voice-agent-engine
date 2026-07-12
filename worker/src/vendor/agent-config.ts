@@ -240,9 +240,26 @@ export const AgentConfig = z.object({
 						 * "handoff" nodes hand the LIVE call off to a DIFFERENT published
 						 * agent (its own persona/flow/tools, fetched from the gateway),
 						 * carrying the conversation context — one-way, no automatic return.
-						 * Terminal for this agent's flow (no normal exits). */
+						 * Terminal for this agent's flow (no normal exits).
+						 * "stop_responding" nodes PARK the contact: the agent stops
+						 * responding but the session stays alive and listening. It never
+						 * hangs up on its own (voice calls still end via the existing
+						 * silence-hangup timeout; text sessions park indefinitely) and never
+						 * returns to the main flow. Global scenarios keep being evaluated
+						 * while parked, so an inbound message can still trigger a scenario
+						 * and route the contact onward. A leaf/terminal node (no exits) that
+						 * is NOT an end-of-call — it must never fire end_call. */
 						kind: z
-							.enum(["agent", "router", "statement", "transfer", "set_field", "modify_tags", "handoff"])
+							.enum([
+								"agent",
+								"router",
+								"statement",
+								"transfer",
+								"set_field",
+								"modify_tags",
+								"handoff",
+								"stop_responding",
+							])
 							.default("agent"),
 						/** Router-only: the statement/question evaluated against the
 						 * conversation (e.g. "The caller has confirmed they speak English"). */
@@ -685,6 +702,12 @@ export const AgentConfig = z.object({
 							message: `handoff node "${node.id}" must have no exits — it hands the call off to another agent one-way and is terminal for this flow`,
 						});
 					}
+				}
+				if (node.kind === "stop_responding" && node.exits.length > 0) {
+					ctx.addIssue({
+						code: "custom",
+						message: `stop_responding node "${node.id}" must have no exits — it parks the contact (agent stops responding, session keeps listening) and only a global scenario can move them onward`,
+					});
 				}
 				for (const exit of node.exits) {
 					if (exit.target && !ids.has(exit.target)) {

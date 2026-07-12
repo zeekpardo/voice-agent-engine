@@ -47,6 +47,8 @@ export interface Transfer {
 export interface TransferDeps {
 	resolveTarget(target: string | undefined): Promise<ResolvedTarget>;
 	buildFlowAgent(nodeId: string, chatCtx?: llm.ChatContext): voice.Agent;
+	/** Build the silent parked agent when a transfer chains into a `stop_responding` node. */
+	buildParkedAgent(chatCtx?: llm.ChatContext): voice.Agent;
 	/** Start an agent-handoff sequence when a transfer chains into a `handoff` node. */
 	startHandoff(target: {
 		agentId: string;
@@ -63,7 +65,7 @@ interface ParticipantLike {
 
 export function createTransfer(ctx: FlowRuntimeContext, deps: TransferDeps): Transfer {
 	const { nodesById, dispatch } = ctx;
-	const { resolveTarget, buildFlowAgent, startHandoff } = deps;
+	const { resolveTarget, buildFlowAgent, buildParkedAgent, startHandoff } = deps;
 
 	// Lazily-started hold-music player, shared across transfers on this call.
 	let backgroundAudio: voice.BackgroundAudioPlayer | null = null;
@@ -253,6 +255,9 @@ export function createTransfer(ctx: FlowRuntimeContext, deps: TransferDeps): Tra
 			if (next.kind === "agent") {
 				const nextCtx = ctx.session.currentAgent.chatCtx.copy({ excludeInstructions: true });
 				ctx.session.updateAgent(buildFlowAgent(next.id, nextCtx));
+			} else if (next.kind === "park") {
+				const nextCtx = ctx.session.currentAgent.chatCtx.copy({ excludeInstructions: true });
+				ctx.session.updateAgent(buildParkedAgent(nextCtx));
 			} else if (next.kind === "end") {
 				await ctx.hangUp("flow_complete");
 			} else if (next.kind === "handoff") {

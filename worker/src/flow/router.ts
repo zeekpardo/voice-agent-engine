@@ -45,13 +45,30 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 				node.kind !== "transfer" &&
 				node.kind !== "set_field" &&
 				node.kind !== "modify_tags" &&
-				node.kind !== "handoff"
+				node.kind !== "handoff" &&
+				node.kind !== "stop_responding"
 			) {
 				return { kind: "agent", id: current };
 			}
 			if (++hops > 5) {
 				console.error(`flow: node chain exceeded 5 hops at node "${node.id}" — ending call`);
 				return { kind: "end" };
+			}
+
+			if (node.kind === "stop_responding") {
+				// Park the contact: the agent stops responding but the session stays
+				// alive and listening. Resolved inline like handoff/transfer — the
+				// caller swaps in the parked agent (which evaluates scenarios each
+				// inbound turn but never speaks). NOT an end: it must not hang up
+				// (voice ends only via the existing silence timeout; text parks
+				// indefinitely) and must not fire end_call. Terminal for this flow
+				// (schema-guarded: no exits) — the chain stops here.
+				reportEvent(dispatch.callId, "flow.node", {
+					node: node.id,
+					name: node.name ?? null,
+					kind: "stop_responding",
+				});
+				return { kind: "park", nodeId: node.id };
 			}
 
 			if (node.kind === "handoff") {

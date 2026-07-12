@@ -1,4 +1,5 @@
 import { llm, voice } from "@livekit/agents";
+import { chatCtxMessages, reportAiTurn } from "../ai-log.js";
 import { reportEvent } from "../gateway.js";
 import { buildTools } from "../tools.js";
 // Vendored copy of the canonical slug scheme (packages/shared/src/slugify.ts,
@@ -20,6 +21,10 @@ import type { ObjectivesTracker, ResolvedTarget } from "./objectives.js";
 
 export interface AgentBuilder {
 	buildFlowAgent(nodeId: string, chatCtx?: llm.ChatContext): voice.Agent;
+	/** A `stop_responding` (park) node: a silent agent that never speaks or hangs
+	 * up but keeps evaluating global scenarios each inbound turn so one can route
+	 * the contact back out. Consumed by resolveTarget's `park` result. */
+	buildParkedAgent(chatCtx?: llm.ChatContext): voice.Agent;
 }
 
 export interface AgentBuilderDeps {
@@ -41,11 +46,18 @@ export interface AgentBuilderDeps {
 	 * when this build is a handoff target — flow/handoff's speak-first nudge.
 	 * The call's own first agent passes none (the greeting opens the call). */
 	entryOnEnter?: () => void;
+	/** Detached transfer/handoff starters — used when a global scenario fires
+	 * WHILE PARKED and routes onto a transfer/handoff target. The parked agent's
+	 * turn hook is not a tool context, so it can't return an AgentHandoff; it drives
+	 * these detached swaps directly (the same functions the objectives judge uses). */
+	startTransfer(nodeId: string): void;
+	startHandoff(target: { agentId: string; fromNode: string; transition?: { say?: string; holdSeconds?: number } }): void;
 }
 
 export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDeps): AgentBuilder {
 	const { flow, nodesById, dispatch, bundle } = ctx;
-	const { resolveTarget, runTransfer, runHandoff, getObjectivesTracker, entryOnEnter } = deps;
+	const { resolveTarget, runTransfer, runHandoff, getObjectivesTracker, entryOnEnter, startTransfer, startHandoff } =
+		deps;
 
 	/**
 	 * Shared tail of every exit tool (regular exits and scenario exits):
@@ -88,6 +100,16 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				transition: resolved.transition,
 			});
 		}
+		if (resolved.kind === "park") {
+			// Park the contact: swap in the silent parked agent. It never speaks or
+			// hangs up (voice ends only via the existing silence timeout; text parks
+			// indefinitely) but keeps evaluating global scenarios each inbound turn.
+			const parkedCtx = runCtx.session.currentAgent.chatCtx.copy({ excludeInstructions: true });
+			return llm.handoff({
+				agent: buildParkedAgent(parkedCtx),
+				returns: "Contact parked — the agent has stopped responding and is listening.",
+			});
+		}
 		const nextCtx = runCtx.session.currentAgent.chatCtx.copy({
 			excludeInstructions: true,
 		});
@@ -108,10 +130,11 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 			node.kind === "router" ||
 			node.kind === "statement" ||
 			node.kind === "transfer" ||
-			node.kind === "handoff"
+			node.kind === "handoff" ||
+			node.kind === "stop_responding"
 		) {
 			throw new Error(
-				`flow node "${nodeId}" is a ${node.kind} — routers, statements, transfers and handoffs are evaluated inline via resolveTarget and never become agents`,
+				`flow node "${nodeId}" is a ${node.kind} — routers, statements, transfers, handoffs and stop_responding are evaluated inline via resolveTarget and never become plain flow agents`,
 			);
 		}
 
@@ -408,5 +431,145 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 		});
 	};
 
-	return { buildFlowAgent };
+	/**
+	 * Evaluate the flow's global scenarios against the transcript so far, out of
+	 * band (a dedicated LLM pass — the SAME pattern the router uses), and return
+	 * the first matching scenario or null. Used only while parked: a parked agent
+	 * never takes a normal reply turn (it throws StopResponse), so scenarios can't
+	 * ride the model's reply-turn tool calls the way they do on a live node — they
+	 * are evaluated here instead. Any error/miss resolves to "no scenario".
+	 */
+	const evaluateParkedScenarios = async (
+		scenarios: { name: string; description: string; target?: string }[],
+	): Promise<{ name: string; description: string; target?: string } | null> => {
+		if (scenarios.length === 0) return null;
+		const transcript = ctx.turns
+			.filter((t) => t.role !== "system")
+			.slice(-40)
+			.map((t) => `${t.role === "user" ? "caller" : "agent"}: ${t.text}`)
+			.join("\n");
+		const evalCtx = new llm.ChatContext();
+		evalCtx.addMessage({
+			role: "system",
+			content:
+				"The agent has stopped responding and is only listening for specific scenarios. Given the conversation transcript, decide whether ANY listed scenario condition is now met. Answer with EXACTLY one scenario name from the list, or the single word none — the name only, nothing else.",
+		});
+		evalCtx.addMessage({
+			role: "user",
+			content: `Scenarios:\n${scenarios
+				.map((s) => `- ${s.name}: ${s.description}`)
+				.join("\n")}\n\nConversation transcript:\n${transcript}`,
+		});
+		const evalLlm = ctx.buildLlm({ model: ctx.models.router });
+		try {
+			const res = await evalLlm.chat({ chatCtx: evalCtx }).collect();
+			ctx.recordUsage("router", res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);
+			reportAiTurn(dispatch.callId, {
+				class: "router",
+				title: "Parked scenario check",
+				model: evalLlm.model,
+				promptTokens: res.usage?.promptTokens ?? 0,
+				completionTokens: res.usage?.completionTokens ?? 0,
+				request: chatCtxMessages(evalCtx),
+				response: res.text,
+			});
+			const lower = res.text.trim().toLowerCase();
+			if (!lower || lower === "none") return null;
+			return (
+				scenarios.find((s) => s.name.toLowerCase() === lower) ??
+				scenarios.find((s) => lower.includes(s.name.toLowerCase())) ??
+				null
+			);
+		} catch (err) {
+			console.error("flow: parked scenario evaluation failed", err);
+			return null;
+		}
+	};
+
+	/** Drive a resolved scenario target out of the parked state (detached — not a
+	 * tool context). Mirrors the objectives judge's transition switch. */
+	const routeOutOfPark = (resolved: ResolvedTarget, session: voice.AgentSession): void => {
+		if (resolved.kind === "agent") {
+			const nextCtx = session.currentAgent.chatCtx.copy({ excludeInstructions: true });
+			session.updateAgent(buildFlowAgent(resolved.id, nextCtx));
+		} else if (resolved.kind === "end") {
+			void ctx.hangUp("flow_complete");
+		} else if (resolved.kind === "transfer") {
+			startTransfer(resolved.nodeId);
+		} else if (resolved.kind === "handoff") {
+			startHandoff({ agentId: resolved.agentId, fromNode: resolved.fromNode, transition: resolved.transition });
+		} else if (resolved.kind === "park") {
+			// Scenario routed onto ANOTHER stop_responding node — re-park.
+			const nextCtx = session.currentAgent.chatCtx.copy({ excludeInstructions: true });
+			session.updateAgent(buildParkedAgent(nextCtx));
+		}
+		// end_after_speech: a terminal statement queued its own hangup — nothing here.
+	};
+
+	/**
+	 * Parked agent (a `stop_responding` node). The agent has stopped responding to
+	 * the contact but the session stays alive and listening:
+	 *  - onEnter marks the runtime parked and disarms the prior node's judge/timer.
+	 *    It NEVER generates a reply, so entering park is silent.
+	 *  - The turn hook throws StopResponse on every inbound turn, so the agent never
+	 *    speaks — no proactive message, no reply. Before doing so it evaluates the
+	 *    global scenarios out of band; if one fires, the contact is routed out of
+	 *    park onto that scenario's branch.
+	 *  - It carries NO forward exits and NO end_call tool, and publishes
+	 *    currentNodeTerminal=false so the shared end_call tool refuses here: park
+	 *    parks, it never hangs up. Voice calls still end via the existing silence
+	 *    timeout; text sessions park indefinitely.
+	 */
+	const buildParkedAgent = (chatCtx?: llm.ChatContext): voice.Agent => {
+		ctx.state.lastTransitionAt = Date.now();
+		const scenarios = flow.scenarios ?? [];
+		const agent = voice.Agent.create({
+			id: "park",
+			instructions:
+				ctx.globalInstructions +
+				"\n\n## LISTENING MODE\nYou have stopped responding to the contact. Do NOT send any message, reply, greeting, or acknowledgement of any kind — produce no output at all. Remain silent and keep listening.",
+			chatCtx,
+			llm: ctx.defaultLlm,
+			// Post-transfer voice (if any) carries over; parked never speaks anyway.
+			tts: ctx.state.ttsOverride,
+			tools: {},
+			onEnter: () => {
+				reportEvent(dispatch.callId, "flow.parked", { scenarios: scenarios.length });
+				ctx.state.parked = true;
+				// NOT a terminal node: end_call must refuse here — park never hangs up.
+				ctx.state.currentNodeTerminal = false;
+				ctx.state.transitionPending = false;
+				// Disarm the previous node's objective judge and any conversation timer.
+				getObjectivesTracker().arm({ id: "park", objectives: [], primaryExit: { name: "end" } });
+				if (ctx.state.conversationTimer) {
+					clearTimeout(ctx.state.conversationTimer);
+					ctx.state.conversationTimer = undefined;
+				}
+			},
+		});
+		// Suppress every reply turn while parked. StopResponse (honored by the SDK in
+		// onUserTurnCompleted) skips the model's reply generation entirely, so the
+		// agent stays silent — but we first run scenario evaluation so an inbound
+		// message can still pull the contact out of park.
+		agent.onUserTurnCompleted = async () => {
+			if (!ctx.state.parked || ctx.state.completed) throw new voice.StopResponse();
+			const matched = await evaluateParkedScenarios(scenarios);
+			if (matched && ctx.state.parked && !ctx.state.completed) {
+				ctx.state.parked = false;
+				reportEvent(dispatch.callId, "flow.exit", {
+					node: "park",
+					exit: matched.name,
+					target: matched.target ?? null,
+					scenario: true,
+				});
+				const resolved = await resolveTarget(matched.target);
+				const session = ctx.state.session;
+				if (session) routeOutOfPark(resolved, session);
+			}
+			throw new voice.StopResponse();
+		};
+		return agent;
+	};
+
+	return { buildFlowAgent, buildParkedAgent };
 }
