@@ -29,8 +29,16 @@ export interface HandoffTarget {
 	/** The source flow's handoff node id (for the flow.handoff event). */
 	fromNode: string;
 	/** The node's optional transition moment: announcement (spoken in the
-	 * SOURCE agent's voice) + hold music before the swap. */
-	transition?: { say?: string; generate?: boolean; holdSeconds?: number };
+	 * SOURCE agent's voice) + hold music before the swap. `mode` selects how the
+	 * swap presents — "announced" (default): say + music + the target's entry
+	 * greeting; "seamless": none of the three, the target just continues the same
+	 * conversation. */
+	transition?: {
+		mode?: "seamless" | "announced";
+		say?: string;
+		generate?: boolean;
+		holdSeconds?: number;
+	};
 }
 
 /** Hold music to play when the node doesn't set holdSeconds — a short beat so
@@ -138,13 +146,25 @@ export function createHandoff(shared: AssembleShared): Handoff {
 			return;
 		}
 
-		// Transition moment (voice channel only): optional announcement in the
-		// SOURCE agent's voice, then hold music — the same CloseBot-style beat the
-		// simulated transfer plays, so a handoff sounds like being connected to a
-		// colleague rather than an instant personality swap. Runs AFTER the fetch
+		// Expose the TARGET agent's display name as {{agent_name}} so the bridge
+		// announcement ("passing you to {{agent_name}}") and the target's entry
+		// greeting ("Hi, this is {{agent_name}}") can name it. Set before any
+		// interpolation below; persists in the shared variable map thereafter.
+		shared.variables.agent_name = bundle.agent.name;
+
+		// Handoff mode (default "announced" — preserves the pre-mode behavior:
+		// say + music + the target's entry greeting). "seamless" suppresses all
+		// three so the target just continues the same conversation.
+		const mode = target.transition?.mode ?? "announced";
+
+		// Transition moment (Announced mode, voice channel only): optional
+		// announcement in the SOURCE agent's voice, then hold music — the same
+		// CloseBot-style beat the simulated transfer plays, so a handoff sounds like
+		// being connected to a colleague rather than an instant personality swap.
+		// Seamless skips it entirely (no bridge, no music). Runs AFTER the fetch
 		// guards (never play music into a call that's about to end) and BEFORE the
 		// ttsOverride below (the announcement belongs to the outgoing agent).
-		if (shared.dispatch.channel !== "text") {
+		if (mode === "announced" && shared.dispatch.channel !== "text") {
 			const t = target.transition;
 			if (t?.say) {
 				// generate=true: the SOURCE agent's model speaks a fresh announcement
@@ -224,10 +244,17 @@ export function createHandoff(shared: AssembleShared): Handoff {
 		// so it only ever surfaces here. Interpolated for {{variables}}; the LANGUAGE
 		// rule in the assembled agent makes the model translate it into the caller's
 		// current language rather than TTS'ing a verbatim string.
+		// Seamless suppresses the target's self-intro entry greeting: the target
+		// still initiates the conversation content (the generic continue nudge
+		// below), just without a "Hi, this is …" opening. Announced (default) uses
+		// the target entry node's entryInstructions as its opening line.
 		const targetFlow = bundle.agent.config.flow;
-		const openingDirection = targetFlow
-			? targetFlow.nodes.find((n) => n.id === targetFlow.entry)?.entryInstructions?.trim()
-			: undefined;
+		const openingDirection =
+			mode === "seamless"
+				? undefined
+				: targetFlow
+					? targetFlow.nodes.find((n) => n.id === targetFlow.entry)?.entryInstructions?.trim()
+					: undefined;
 
 		// Skip when the last thing said is an unanswered agent question — opening
 		// would stack a second question; let the caller answer first.

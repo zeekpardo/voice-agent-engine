@@ -383,6 +383,19 @@ export const AgentConfig = z.object({
 						 */
 						handoff: z
 							.object({
+								/**
+								 * How the swap presents to the contact:
+								 *   "announced" (default) — two beats: the SOURCE agent sends the
+								 *     `say` bridge ("hold tight, passing you to {{agent_name}}"),
+								 *     then the TARGET agent opens with its own entry greeting.
+								 *     On voice the hold music may still cover the swap.
+								 *   "seamless" — the target just continues the SAME conversation:
+								 *     NO source bridge, NO target self-intro, NO hold music. To the
+								 *     contact it feels like one continuous conversation.
+								 * Default "announced" preserves the pre-mode behavior (a handoff
+								 * that set a `say` + music still says + plays + the target greets).
+								 */
+								mode: z.enum(["seamless", "announced"]).optional(),
 								say: z.string().optional(),
 								/** When absent/false (default): `say` is the announcement spoken
 								 * VERBATIM in the SOURCE agent's voice. When true: `say` is a

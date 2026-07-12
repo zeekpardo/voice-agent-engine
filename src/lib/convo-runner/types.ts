@@ -90,10 +90,29 @@ export interface TurnContext {
 	events: ConvEvent[];
 }
 
+/** How an agent handoff presents to the contact (mirrors the shared handoff
+ * schema `mode`; default "announced"). */
+export type HandoffMode = "seamless" | "announced";
+
 /** Where a flow exit lands after following routers/statements/write nodes. */
 export type ResolvedTarget =
 	| { kind: "agent"; id: string; saySoFar: string[] }
 	| { kind: "end"; saySoFar: string[] }
+	/**
+	 * Agent handoff: the turn-runner swaps the active agent to `agentId` (the
+	 * target published agent) and continues under its config. `mode` selects the
+	 * presentation — "announced" sends a bridge + the target's entry greeting;
+	 * "seamless" swaps silently and continues.
+	 */
+	| {
+			kind: "handoff";
+			nodeId: string;
+			agentId: string;
+			mode: HandoffMode;
+			say?: string;
+			generate?: boolean;
+			saySoFar: string[];
+	  }
 	| { kind: "unsupported"; nodeId: string; reason: string; saySoFar: string[] };
 
 export function newUsageByClass(): UsageByClass {
