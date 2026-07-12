@@ -21,7 +21,7 @@ const schema = z.object({
 	ANTHROPIC_API_KEY: z.string().optional(),
 	// Claude model for the TEXT respond path (used only when ANTHROPIC_API_KEY is
 	// set and no config.models.respond override). Mirrors the gateway default.
-	ANTHROPIC_TEXT_MODEL: z.string().default("claude-sonnet-5"),
+	ANTHROPIC_TEXT_MODEL: z.string().default("claude-sonnet-4-5-20250929"),
 });
 
 const parsed = schema.safeParse(process.env);

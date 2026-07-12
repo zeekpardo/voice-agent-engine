@@ -26,7 +26,7 @@ const schema = z.object({
 	TRANSLATE_MODEL: z.string().default("claude-opus-4-8"),
 	// Claude model for the TEXT respond path (used only when ANTHROPIC_API_KEY is
 	// set and the agent has no explicit models.respond override).
-	ANTHROPIC_TEXT_MODEL: z.string().default("claude-sonnet-5"),
+	ANTHROPIC_TEXT_MODEL: z.string().default("claude-sonnet-4-5-20250929"),
 	// OpenAI. Optional — powers the premium TEXT objective JUDGE path (mirrors
 	// the ANTHROPIC_API_KEY story above but for judging, not responding). When
 	// OPENAI_API_KEY is set, text conversations whose node/agent has no explicit
