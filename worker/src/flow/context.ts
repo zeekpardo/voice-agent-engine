@@ -362,6 +362,15 @@ export interface FlowRuntimeState {
 	 * main.ts for the call's own agent; re-pointed by flow/handoff on each handoff.
 	 */
 	turnHooks: { objective?: () => void; memory?: () => void };
+	/**
+	 * Field keys whose value was CAPTURED IN THIS CALL (a verified objective write
+	 * or a set_field), as opposed to preloaded from the CRM at dispatch. In-call
+	 * carryover memory: a later node (or a handoff target) uses this to treat an
+	 * objective it would otherwise re-ask as already satisfied — WITHOUT trusting
+	 * stale CRM values (that is governed separately by the objective's skipIfKnown).
+	 * A stable Set reference threaded through every assembled agent on the call.
+	 */
+	capturedFields: Set<string>;
 }
 
 /** Resolved rolling-memory settings (config.memory with defaults applied). */

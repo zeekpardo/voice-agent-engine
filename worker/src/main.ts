@@ -129,6 +129,9 @@ export default defineAgent({
 			// Populated below for the call's own agent; re-pointed by flow/handoff
 			// to the target's trackers on each agent handoff.
 			turnHooks: {},
+			// Grows as objective/set_field writes capture values this call (in-call
+			// carryover memory); shared across handoffs so the target doesn't re-ask.
+			capturedFields: new Set<string>(),
 		};
 
 		const EMPTY_PARAMS = {
