@@ -2,6 +2,7 @@ import { llm, voice, workflows } from "@livekit/agents";
 import { SipClient } from "livekit-server-sdk";
 import { env } from "../env.js";
 import { reportEvent } from "../gateway.js";
+import { TRANSFER_FAILED_EXIT_NAME } from "../vendor/agent-config.js";
 import type { FlowRuntimeContext } from "./context.js";
 import type { ResolvedTarget } from "./objectives.js";
 
@@ -180,10 +181,40 @@ export function createTransfer(ctx: FlowRuntimeContext, deps: TransferDeps): Tra
 			ctx.state.completed = true;
 			return "transfer complete";
 		} catch (err) {
-			// Dial failed / declined / voicemail / timeout — return the caller to the
-			// flow (the exit target) rather than dropping them.
+			// WarmTransferTask.run() rejects on EVERY failure mode (dial failed /
+			// declined / voicemail / no-answer / timeout) — there is exactly one
+			// failure path, so a single "Not Connected" exit is correct. If the node
+			// has that designated failure exit WITH a target, route the caller there —
+			// mirroring startTransfer's simulated exit-routing (same resolveTarget +
+			// agent/park/end/handoff switch, same excludeInstructions chatCtx copy) —
+			// instead of dropping them mid-flow. With no such exit/target, keep the
+			// historical StopResponse fallback so pre-existing configs are unchanged.
 			console.error(`flow: warm transfer node "${nodeId}" failed`, err);
-			reportEvent(dispatch.callId, "flow.transfer_warm_failed", { node: nodeId, target });
+			const failExit = node?.exits.find((e) => e.name === TRANSFER_FAILED_EXIT_NAME);
+			const failTarget = failExit?.target;
+			reportEvent(dispatch.callId, "flow.transfer_warm_failed", {
+				node: nodeId,
+				target,
+				routedTo: failTarget ?? null,
+			});
+			if (failTarget) {
+				const next = await resolveTarget(failTarget);
+				if (next.kind === "agent") {
+					const nextCtx = ctx.session.currentAgent.chatCtx.copy({ excludeInstructions: true });
+					ctx.session.updateAgent(buildFlowAgent(next.id, nextCtx));
+				} else if (next.kind === "park") {
+					const nextCtx = ctx.session.currentAgent.chatCtx.copy({ excludeInstructions: true });
+					ctx.session.updateAgent(buildParkedAgent(nextCtx));
+				} else if (next.kind === "end") {
+					await ctx.hangUp("flow_complete");
+				} else if (next.kind === "handoff") {
+					startHandoff({
+						agentId: next.agentId,
+						fromNode: next.fromNode,
+						transition: next.transition,
+					});
+				}
+			}
 			throw new voice.StopResponse();
 		}
 	};

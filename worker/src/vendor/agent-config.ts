@@ -12,6 +12,19 @@ import { z } from "zod";
 import { slugify } from "./slugify.js";
 
 /**
+ * Reserved exit name for a transfer node's FAILURE path (cross-repo join key).
+ *
+ * A "warm" transfer resolves ONLY on a successful human connect and rejects on
+ * EVERY failure mode (dial failed / declined / voicemail / no-answer / timeout)
+ * — one failure path, so one exit. The SaaS compiler emits the transfer node's
+ * failure handle as an exit whose `name` is exactly this string; the engine's
+ * warm-transfer catch matches on it to route the caller to a "Not Connected"
+ * node instead of dropping them mid-flow. Kept here (the single source of truth,
+ * vendored into the worker) so both sides agree on the literal.
+ */
+export const TRANSFER_FAILED_EXIT_NAME = "Not Connected";
+
+/**
  * AgentConfig — the heart of engine neutrality (spec §4).
  *
  * An agent is a JSONB document; nothing vertical-specific is a first-class
