@@ -1,5 +1,6 @@
 import { interpolate } from "@voice-engine/shared/agent-config";
-import { chatComplete } from "../llm.js";
+import { env } from "../../env.js";
+import { chatComplete, openaiComplete } from "../llm.js";
 import { resolveToolDef } from "./tools.js";
 import { invokeWriteTool } from "./tools.js";
 import { type ResolvedTarget, recordUsage, type TurnContext } from "./types.js";
@@ -110,9 +111,16 @@ export async function resolveTarget(ctx: TurnContext, targetId: string | undefin
 
 		let chosen = fallbackExit;
 		let decision = "";
-		const routerModel = node.llm?.model ?? ctx.config.models?.router ?? ctx.config.llm.model;
+		// Router model selection, mirroring the judge/summary precedence (judge.ts,
+		// memory.ts): an explicit override (node.llm.model, then config.models.router)
+		// always wins; otherwise prefer OpenAI's cheap mini tier (OPENAI_ROUTER_MODEL)
+		// when OPENAI_API_KEY is set; otherwise fall back to the pre-existing xAI default.
+		const routerOverride = node.llm?.model ?? ctx.config.models?.router;
+		const useOpenAI = !routerOverride && !!env.OPENAI_API_KEY;
+		const routerModel = routerOverride ?? (useOpenAI ? env.OPENAI_ROUTER_MODEL : "grok-4-fast");
 		try {
-			const res = await chatComplete({
+			const complete = useOpenAI ? openaiComplete : chatComplete;
+			const res = await complete({
 				model: routerModel,
 				temperature: node.llm?.temperature ?? 0,
 				maxTokens: 20,

@@ -460,7 +460,9 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				.map((s) => `- ${s.name}: ${s.description}`)
 				.join("\n")}\n\nConversation transcript:\n${transcript}`,
 		});
-		const evalLlm = ctx.buildLlm({ model: ctx.models.router });
+		// Same router-tier default as flow/router.ts: config.models.router wins,
+		// else the Inference cheap default openai/gpt-4o-mini.
+		const evalLlm = ctx.buildLlm({ model: ctx.models.router ?? "openai/gpt-4o-mini" });
 		try {
 			const res = await evalLlm.chat({ chatCtx: evalCtx }).collect();
 			ctx.recordUsage("router", res.usage?.promptTokens ?? 0, res.usage?.completionTokens ?? 0);

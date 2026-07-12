@@ -38,6 +38,13 @@ const schema = z.object({
 	OPENAI_API_KEY: z.string().optional(),
 	OPENAI_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
 	OPENAI_JUDGE_MODEL: z.string().default("gpt-5-mini"),
+	// Cheap-tier OpenAI models for the TEXT summary + router roles (same
+	// OPENAI_API_KEY gating story as OPENAI_JUDGE_MODEL above — set → these
+	// power the rolling-memory refresh / router-node evaluation when the
+	// agent/node has no explicit models.summary / models.router override;
+	// unset → both fall back to xAI grok-4-fast, unchanged pre-key behavior).
+	OPENAI_SUMMARY_MODEL: z.string().default("gpt-4.1-nano"),
+	OPENAI_ROUTER_MODEL: z.string().default("gpt-4o-mini"),
 	TRANSLATE_MAX_TOKENS: z.coerce.number().int().positive().default(4096),
 	// Admin API (key issuance + usage). If unset, /admin routes are disabled.
 	ADMIN_TOKEN: z.string().optional(),
