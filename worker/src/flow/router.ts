@@ -114,6 +114,10 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 					// Reflect the write into the in-memory contactState so a later
 					// node's prompt shows the value instead of UNRESOLVED (Phase 1).
 					upsertContactState(ctx.contactState, sf.field, written);
+					// In-call carryover: mark this field as captured THIS call so a later
+					// node / handoff target treats it as answered (not re-asked). Empty
+					// writes don't count as a captured answer.
+					if (written) ctx.state.capturedFields.add(sf.field);
 					void invokeTool(fieldWriteDef, dispatch, {
 						field_name: sf.field,
 						value: written,

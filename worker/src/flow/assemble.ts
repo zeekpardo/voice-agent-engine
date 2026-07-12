@@ -442,6 +442,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		dispatch,
 		turns,
 		contactState,
+		capturedFields: state.capturedFields,
 		get session() {
 			return state.session!;
 		},

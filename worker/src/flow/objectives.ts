@@ -98,6 +98,12 @@ export interface ObjectivesDeps {
 	 * skipIfKnown; written (upsert) when a verified objective field is saved so
 	 * the next node's prompt reflects it. Same array reference threaded from main.ts. */
 	contactState: ContactStateEntryT[];
+	/** Field keys captured IN THIS CALL (state.capturedFields). Used at arm() to
+	 * pre-satisfy an objective from an in-call answer — including a name key that
+	 * differs from the source's (first_name vs full_name) — WITHOUT trusting stale
+	 * CRM values (that stays governed by skipIfKnown). A value is recorded here
+	 * whenever this tracker writes a verified objective field. */
+	capturedFields: Set<string>;
 	session: voice.AgentSession;
 	buildLlm: (over?: {
 		model?: string;
@@ -284,6 +290,61 @@ const normalizeObjectiveAnswer = (o: FlowObjective, answer: string): string => {
 	return answer;
 };
 
+/** A name-shaped field key (first_name, last_name, full_name, contact_name, …).
+ * Consistent with the existing generic email/phone field heuristics above — no
+ * CRM/business mapping, just the shape of the key. Used ONLY to reconcile a
+ * name value captured under one key with a target objective asking under another. */
+const isNameField = (field: string): boolean => /name/i.test(field);
+
+/**
+ * In-call carryover resolution: has this objective's value ALREADY been captured
+ * earlier in THIS call? Returns that value (so the objective can start met without
+ * re-asking), or undefined to fall through to normal judging. Only reads keys in
+ * `captured` (values written THIS call — never stale CRM), so a false positive can
+ * at worst reuse a value the caller just gave; a miss simply re-asks as today.
+ *
+ * Handles the common key mismatch across a handoff (intake captured `first_name`,
+ * the target asks `full_name`): captured name parts are bucketed and recomposed to
+ * fit the target's name key. Non-name fields require an exact key match.
+ */
+const resolveCarriedAnswer = (
+	objective: FlowObjective,
+	contactState: ContactStateEntryT[],
+	captured: Set<string>,
+): string | undefined => {
+	const field = objective.field;
+	if (!field) return undefined;
+	const valueOf = (key: string): string | undefined => {
+		if (!captured.has(key)) return undefined;
+		const v = contactState.find((e) => e.key === key)?.value;
+		return v != null && v !== "" ? v : undefined;
+	};
+	// Exact key captured in-call — the clean common case.
+	const direct = valueOf(field);
+	if (direct) return direct;
+	// Name key mismatch: recompose from whatever name parts were captured this call.
+	if (!isNameField(field)) return undefined;
+	let first: string | undefined;
+	let last: string | undefined;
+	let full: string | undefined;
+	for (const e of contactState) {
+		if (!captured.has(e.key) || !isNameField(e.key) || e.value == null || e.value === "") continue;
+		const k = e.key.toLowerCase();
+		if (k.includes("first") || k.includes("given")) first ??= e.value;
+		else if (k.includes("last") || k.includes("surname") || k.includes("family")) last ??= e.value;
+		else full ??= e.value;
+	}
+	const firstTok = (s: string | undefined) => s?.trim().split(/\s+/)[0];
+	const lastTok = (s: string | undefined) => s?.trim().split(/\s+/).at(-1);
+	const target = field.toLowerCase();
+	if (target.includes("first") || target.includes("given")) return first ?? firstTok(full);
+	if (target.includes("last") || target.includes("surname") || target.includes("family")) return last ?? lastTok(full);
+	// full_name / name / generic: prefer a captured full value, else compose the parts.
+	if (full) return full;
+	const composed = [first, last].filter(Boolean).join(" ").trim();
+	return composed || undefined;
+};
+
 /**
  * Idle = agent finished speaking its current reply. Bounded: a stuck state
  * must not wedge the flow, so transition anyway after timeoutMs.
@@ -308,7 +369,7 @@ function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promi
 }
 
 export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
-	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, buildParkedAgent, startTransfer, startHandoff, hangUp, isCompleted, setTransitionPending, judgeModel, recordUsage, recordNodeResult, onProgress, setObjectivesComplete } =
+	const { dispatch, turns, contactState, capturedFields, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, buildParkedAgent, startTransfer, startHandoff, hangUp, isCompleted, setTransitionPending, judgeModel, recordUsage, recordNodeResult, onProgress, setObjectivesComplete } =
 		deps;
 	// `session` is a LAZY getter on deps (the AgentSession is built after this
 	// factory wires up) — it MUST be read fresh via deps.session at call time.
@@ -347,6 +408,10 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 		// Reflect the write into the in-memory contactState so the next node's
 		// prompt shows the value instead of UNRESOLVED (Phase 1 live updates).
 		upsertContactState(contactState, objective.field, written);
+		// In-call carryover: this value was verified & captured THIS call, so a later
+		// node / handoff target can treat it as answered instead of re-asking — even if
+		// its objective uses a different name key (first_name vs full_name).
+		capturedFields.add(objective.field);
 		console.log(
 			`flow: contactState updated ${objective.field} -> "${written}" | now: ${JSON.stringify(contactState)}`,
 		);
@@ -807,6 +872,32 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 					source: "known",
 				});
 				console.log(`flow: objective "${o.key}" met from known contact field "${o.field}" (skipIfKnown)`);
+			}
+			// In-call carryover (warm hand-off / cross-node memory): an objective whose
+			// value was ALREADY captured earlier in THIS call starts MET — no judge, no
+			// re-asking. Distinct from skipIfKnown above: this reuses ONLY values written
+			// this call (state.capturedFields), never stale CRM, so it fires even when the
+			// objective sets skipIfKnown:false — and it reconciles a differing name key
+			// (source captured first_name, target asks full_name). No field write: the
+			// value is already in the CRM (exact match) or is a SaaS mapping concern
+			// (recomposed name). Aggregates complete from their parts, so skip them here.
+			for (const o of node.objectives) {
+				if (o.aggregateOf?.length) continue;
+				const progress = rt.state.get(o.key)!;
+				if (progress.met) continue;
+				const carried = resolveCarriedAnswer(o, contactState, capturedFields);
+				if (!carried) continue;
+				progress.met = true;
+				progress.rating = 100;
+				progress.answer = carried;
+				reportEvent(dispatch.callId, "flow.objective", {
+					node: rt.nodeId,
+					key: o.key,
+					rating: 100,
+					answer: carried.slice(0, 200),
+					source: "carryover",
+				});
+				console.log(`flow: objective "${o.key}" met from in-call captured data (carryover) -> "${carried}"`);
 			}
 			activeObjectives = rt;
 			// An aggregate whose parts were all satisfied by skipIfKnown completes now.

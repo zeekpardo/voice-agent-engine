@@ -274,10 +274,20 @@ export function createHandoff(shared: AssembleShared): Handoff {
 				});
 				return;
 			}
+			// Warm hand-off opening: the target inherits the full conversation context
+			// (the copied chatCtx) AND the target agent's own KNOWN CONTACT INFO block,
+			// so it can open PERSONALLY — greet the caller by name if that name is
+			// known, briefly acknowledge their stated intent (e.g. selling their home),
+			// then move to its first needed question. It must NOT recap or re-ask what
+			// the previous agent already collected in this same call. Name is used ONLY
+			// when actually known — no placeholder when it isn't. The LANGUAGE rule in
+			// the assembled agent still makes the model open in the caller's language.
+			const warmOpen =
+				"You have just taken over this same ongoing call from a colleague — it is the SAME caller, already mid-conversation. Open warmly and personally in ONE short, natural turn: if you know the caller's name (from the conversation so far or the known contact info), greet them BY NAME; if you do not know it, greet them naturally WITHOUT a name and never use a placeholder. In that same opening, briefly acknowledge what they are already here for based on what they told your colleague (for example, that they're looking to sell their home). Do NOT re-introduce the call, do NOT recap details already covered, and do NOT re-ask anything the caller has already answered — weave in or confirm what you already know instead of asking for it.";
 			sess.generateReply({
 				instructions: openingDirection
-					? `You have just taken over this same ongoing call. ${interpolate(openingDirection, shared.variables)} Do not recap what was already covered. Speak in the language the caller is currently using.`
-					: "You have just taken over this same ongoing call. Continue it in your own role — no greeting, no re-introduction, no recap of what was already covered. Move naturally to your first point or question.",
+					? `${warmOpen} Then: ${interpolate(openingDirection, shared.variables)} Speak in the language the caller is currently using.`
+					: `${warmOpen} Then lead naturally into your first needed question. Speak in the language the caller is currently using.`,
 			});
 		};
 
