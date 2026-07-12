@@ -43,7 +43,7 @@ export interface MemoryDeps {
 	 * compaction), never during wiring. */
 	getSession: () => voice.AgentSession | undefined;
 	/** Summary model tier (config.models.summary). memory.model wins over this;
-	 * both unset → grok-4-fast (unchanged). */
+	 * both unset → openai/gpt-4o-mini via Inference (cheap-tier default). */
 	summaryModel?: string;
 	/** Record one summary-call's token usage under the "summary" class (Phase 4). */
 	recordUsage: (promptTokens: number, completionTokens: number) => void;
@@ -82,11 +82,15 @@ const SUMMARY_SYSTEM =
 export function createMemoryTracker(deps: MemoryDeps): MemoryTracker {
 	const { dispatch, turns, rollingSummary, memory, buildLlm, getSession, summaryModel, recordUsage } = deps;
 
-	// One reusable cheap LLM (temp 0). Summary tier (Phase 4): the per-config
-	// memory.model wins, then config.models.summary, then grok-4-fast. This is a
-	// standalone call the session's MetricsCollected never sees — usage is read
-	// straight off each collected response (see regenerate) into the "summary" class.
-	const summaryLlm = buildLlm({ model: memory.model ?? summaryModel ?? "grok-4-fast", temperature: 0, maxTokens: 400 });
+	// One reusable cheap LLM (temp 0). Summary tier (Phase 4, cheap-router update):
+	// the per-config memory.model wins, then config.models.summary, then the
+	// Inference cheap default openai/gpt-4o-mini (Inference brokers OpenAI, no
+	// separate key needed on the worker; gpt-4.1-nano is not in the Inference
+	// catalog so it can't be used here the way the gateway text path uses it).
+	// This is a standalone call the session's MetricsCollected never sees — usage
+	// is read straight off each collected response (see regenerate) into the
+	// "summary" class.
+	const summaryLlm = buildLlm({ model: memory.model ?? summaryModel ?? "openai/gpt-4o-mini", temperature: 0, maxTokens: 400 });
 
 	let userTurns = 0;
 	let generating = false;

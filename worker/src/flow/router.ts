@@ -275,11 +275,12 @@ export function createRouter(ctx: FlowRuntimeContext): Router {
 				.refine((s) => s.length > 0 && matchExit(s) !== undefined, "decision does not name a listed option");
 			let chosen = fallbackExit;
 			let decision = "";
-			// Router tier (Phase 4): a DEDICATED instance (never the shared defaultLlm)
-			// so this standalone evaluation's tokens are metered as "router" and never
-			// double-counted by the session's responder MetricsCollected. node.llm
-			// override wins; else config.models.router, else config.llm.model.
-			const evalLlm = node.llm ? ctx.buildLlm(node.llm) : ctx.buildLlm({ model: ctx.models.router });
+			// Router tier (Phase 4, cheap-router update): a DEDICATED instance (never
+			// the shared defaultLlm) so this standalone evaluation's tokens are
+			// metered as "router" and never double-counted by the session's responder
+			// MetricsCollected. node.llm override wins; else config.models.router;
+			// else the Inference cheap default openai/gpt-4o-mini (was config.llm.model).
+			const evalLlm = node.llm ? ctx.buildLlm(node.llm) : ctx.buildLlm({ model: ctx.models.router ?? "openai/gpt-4o-mini" });
 			for (let attempt = 0; attempt < 2; attempt++) {
 				// Corrective retry stays OFF the speech path (router eval is a standalone
 				// background pass). The nudge matches the router's option-name contract —

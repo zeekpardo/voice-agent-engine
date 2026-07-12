@@ -1,4 +1,5 @@
-import { chatComplete } from "../llm.js";
+import { env } from "../../env.js";
+import { chatComplete, openaiComplete } from "../llm.js";
 import { recordUsage, type TurnContext } from "./types.js";
 
 /**
@@ -43,9 +44,16 @@ export async function maybeRefreshSummary(ctx: TurnContext): Promise<void> {
 	if (older.length === 0) return;
 
 	const transcript = older.map((t) => `${t.role === "user" ? "person" : "agent"}: ${t.text}`).join("\n");
-	const model = settings.model ?? ctx.config.models?.summary ?? "grok-4-fast";
+	// Summary model selection, mirroring the judge/responder precedence (judge.ts,
+	// index.ts): an explicit override (config.memory.model, then config.models.summary)
+	// always wins; otherwise prefer OpenAI's cheap nano tier (OPENAI_SUMMARY_MODEL) when
+	// OPENAI_API_KEY is set; otherwise fall back to the pre-existing xAI default.
+	const override = settings.model ?? ctx.config.models?.summary;
+	const useOpenAI = !override && !!env.OPENAI_API_KEY;
+	const model = override ?? (useOpenAI ? env.OPENAI_SUMMARY_MODEL : "grok-4-fast");
 	try {
-		const res = await chatComplete({
+		const complete = useOpenAI ? openaiComplete : chatComplete;
+		const res = await complete({
 			model,
 			temperature: 0,
 			maxTokens: 400,
