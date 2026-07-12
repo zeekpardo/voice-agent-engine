@@ -912,6 +912,75 @@ export type FlowScenario = Flow["scenarios"][number];
 export type FlowObjective = NonNullable<FlowNode["objectives"]>[number];
 
 /**
+ * True when a node marked `channels` runs on `channel`. A node with no
+ * `channels` mark (the default) runs on BOTH channels. An empty or
+ * both-channels mark is treated as "no restriction".
+ */
+export function channelAllows(channels: ChannelT[] | undefined, channel: ChannelT): boolean {
+	if (!channels || channels.length === 0) return true;
+	const hasVoice = channels.includes("voice");
+	const hasText = channels.includes("text");
+	if (hasVoice && hasText) return true;
+	return channels.includes(channel);
+}
+
+/** First exit target of a node (the "Next"-style primary edge), or undefined. */
+function primaryExitTargetOf(node: FlowNode | undefined): string | undefined {
+	if (!node || node.exits.length === 0) return undefined;
+	const withTarget = node.exits.find((exit) => exit.target);
+	return (withTarget ?? node.exits[0])?.target;
+}
+
+/**
+ * Prune every node that does not run on `channel` and splice the graph back
+ * together so it stays connected — the runtime counterpart of the SaaS
+ * compiler's `pruneFlowForChannel`. The gateway serves BOTH channels from the
+ * same published `config.flow`; the turn-based conversation runner (text/SMS)
+ * runs the text-pruned spec so voice-only nodes (e.g. `transfer` — announcement
+ * + hold music + voice swap / SIP forward, which the SaaS compiler always marks
+ * voice-only) are skipped automatically, with edges re-pointed PAST them rather
+ * than dead-ending the conversation.
+ *
+ *  - A node whose `channels` excludes `channel` is removed.
+ *  - Any edge (exit target, entry, scenario target) that pointed at a pruned
+ *    node is re-pointed to that node's primary exit target — transitively, so a
+ *    chain of pruned nodes collapses to the first surviving node past it.
+ *  - A pruned chain that dead-ends (or cycles among pruned nodes) resolves to
+ *    undefined — the edge simply ends there (the conversation ends / leaf exit).
+ *
+ * Nodes marked for BOTH channels (the default — no mark) always survive, so a
+ * flow with no channel marks is returned UNCHANGED (same reference — zero cost).
+ */
+export function pruneFlowForChannel(flow: Flow, channel: ChannelT): Flow {
+	const prunedIds = new Set(
+		flow.nodes.filter((node) => !channelAllows(node.channels, channel)).map((node) => node.id),
+	);
+	if (prunedIds.size === 0) return flow;
+
+	const byId = new Map(flow.nodes.map((node) => [node.id, node]));
+
+	const resolve = (id: string | undefined, seen: Set<string> = new Set()): string | undefined => {
+		if (!id || !prunedIds.has(id)) return id;
+		if (seen.has(id)) return undefined; // cycle among pruned nodes
+		seen.add(id);
+		return resolve(primaryExitTargetOf(byId.get(id)), seen);
+	};
+
+	const nodes = flow.nodes
+		.filter((node) => !prunedIds.has(node.id))
+		.map((node) => ({
+			...node,
+			exits: node.exits.map((exit) => ({ ...exit, target: resolve(exit.target) })),
+		}));
+
+	const scenarios = flow.scenarios
+		.map((scenario) => ({ ...scenario, target: resolve(scenario.target) }))
+		.filter((scenario): scenario is FlowScenario => scenario.target !== undefined);
+
+	return { ...flow, entry: resolve(flow.entry) ?? "", nodes, scenarios };
+}
+
+/**
  * Interpolate {{variables}} into instructions/greeting — how per-call context
  * enters without per-call configs (spec §5). Unknown placeholders are left
  * intact so a missing variable is visible in transcripts rather than silent.
