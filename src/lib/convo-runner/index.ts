@@ -10,7 +10,13 @@ import { recordUsage as meterUsage } from "../usage.js";
 import { aiTurnEvent, providerFromModel } from "./ai-log.js";
 import { allRequiredMet, armObjectives, judgeObjectives } from "./judge.js";
 import { maybeRefreshSummary, memorySettings } from "./memory.js";
-import { buildResponderMessages, buildSystemPrompt, CONTINUATION_DIRECTIVE, WRAP_UP_DIRECTIVE } from "./prompt.js";
+import {
+	buildResponderMessages,
+	buildSystemPrompt,
+	CONTINUATION_DIRECTIVE,
+	continuationNode,
+	WRAP_UP_DIRECTIVE,
+} from "./prompt.js";
 import { resolveTarget } from "./router.js";
 import {
 	type ConversationState,
@@ -417,8 +423,21 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 	// set for a wrap-up — that's the graceful goodbye.
 	let reply: string | null = null;
 	if ((!ended || wrapUp) && !skipResponder) {
-		let system = buildSystemPrompt(ctx, node);
-		if (inContinuation) system += wrapUp ? WRAP_UP_DIRECTIVE : CONTINUATION_DIRECTIVE;
+		// The active continuation turn (toggle ON, past terminal, not disengaging)
+		// ENTERS the Conversation-node behavior: an open-ended, reason-driven stage
+		// seeded from the agent's goal — the CloseBot "keeping the conversation
+		// going" shape (## CONVERSATION REASON + business/persona via instructions +
+		// response style + rolling summary, no objectives). If the agent has no goal
+		// text to seed a reason, fall back to the light CONTINUATION_DIRECTIVE so it
+		// still works. Wrap-up (disengage) still uses the flow-less + WRAP_UP path.
+		const continuationReason = (bundle.config.goal ?? "").trim();
+		let system: string;
+		if (inContinuation && !wrapUp && continuationReason) {
+			system = buildSystemPrompt(ctx, continuationNode(continuationReason));
+		} else {
+			system = buildSystemPrompt(ctx, node);
+			if (inContinuation) system += wrapUp ? WRAP_UP_DIRECTIVE : CONTINUATION_DIRECTIVE;
+		}
 		const messages = buildResponderMessages(system, ctx.turns, memorySettings(ctx).windowTurns);
 		reply = await respond(ctx, bundle, node, messages);
 	}
