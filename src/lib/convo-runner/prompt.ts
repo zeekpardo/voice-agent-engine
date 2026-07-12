@@ -50,6 +50,40 @@ export const CONTINUATION_DIRECTIVE =
 export const WRAP_UP_DIRECTIVE =
 	"\n\n## WRAP UP\nThe person is signaling they're done. Send ONE short, warm closing message — thank them and say goodbye. Do not ask any further questions.";
 
+/**
+ * Per-agent phrasing/tone directive (config.responseStyle) — the gateway-side
+ * port of the worker's `## RESPONSE STYLE` block (worker/src/flow/assemble.ts).
+ * Distinct from persona identity: when set it rides on EVERY generated message
+ * so replies stay varied and natural. Empty/unset → inject nothing, so existing
+ * agents talk exactly as before. Mirrors the worker's exact label so voice and
+ * text/SMS carry an identical style directive.
+ */
+function responseStyleBlock(ctx: TurnContext): string {
+	const style = (ctx.config.responseStyle ?? "").trim();
+	if (!style) return "";
+	return `\n\n## RESPONSE STYLE\n${style}`;
+}
+
+/**
+ * Synthetic Conversation node for the "keep the conversation going" continuation
+ * (FIX 2). Once the flow reaches terminal with config.continueConversation ON,
+ * the runner drives further turns through the SAME open-ended, reason-driven
+ * Conversation-node prompt path (the `isConversation` branch below) rather than
+ * an ad-hoc directive — seeded from the agent's goal (`reason`), objective-less.
+ * It has no stage instructions (so no `## YOUR CURRENT STAGE` block) and no
+ * exits; it exists only to build the continuation prompt.
+ */
+export function continuationNode(reason: string): FlowNode {
+	return {
+		id: "__continuation__",
+		kind: "agent",
+		instructions: "",
+		toolIds: [],
+		exits: [],
+		conversation: { reason, wrapUp: { mode: "end_call" } },
+	} as unknown as FlowNode;
+}
+
 function contactInfoBlock(ctx: TurnContext): string {
 	if (ctx.state.contactState.length === 0) return "";
 	return `\n\n## KNOWN CONTACT INFO\nYou already know these details about the person. NEVER ask for a value shown here — if you need one, weave it in or confirm it naturally instead of asking. A field shown as UNRESOLVED is still unknown; those you MAY ask about. Never write the word "UNRESOLVED".\n${ctx.state.contactState
@@ -78,7 +112,15 @@ export function buildSystemPrompt(ctx: TurnContext, node: FlowNode | undefined):
 	const global = interp(ctx.config.instructions);
 
 	if (!node) {
-		return global + summaryBlock(ctx) + contactInfoBlock(ctx) + CONTINUITY + TEXT_STYLE + prohibitedBlock(ctx);
+		return (
+			global +
+			summaryBlock(ctx) +
+			contactInfoBlock(ctx) +
+			CONTINUITY +
+			TEXT_STYLE +
+			responseStyleBlock(ctx) +
+			prohibitedBlock(ctx)
+		);
 	}
 
 	const conversation = node.conversation;
@@ -86,7 +128,8 @@ export function buildSystemPrompt(ctx: TurnContext, node: FlowNode | undefined):
 	const objectives = isConversation ? [] : (node.objectives ?? []);
 	const hasObjectives = objectives.length > 0;
 
-	const stageBlock = `\n\n## YOUR CURRENT STAGE\n${interp(node.instructions)}`;
+	const stageInstr = interp(node.instructions).trim();
+	const stageBlock = stageInstr ? `\n\n## YOUR CURRENT STAGE\n${stageInstr}` : "";
 
 	const conversationReasonBlock = isConversation
 		? `\n\n## CONVERSATION REASON\n${interp(conversation!.reason)}${
@@ -120,6 +163,7 @@ export function buildSystemPrompt(ctx: TurnContext, node: FlowNode | undefined):
 		contactInfoBlock(ctx) +
 		CONTINUITY +
 		TEXT_STYLE +
+		responseStyleBlock(ctx) +
 		prohibitedBlock(ctx)
 	);
 }
