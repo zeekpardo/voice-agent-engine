@@ -1,6 +1,7 @@
 import type { FlowNode, FlowObjective } from "@voice-engine/shared/agent-config";
 import { z } from "zod";
-import { chatComplete } from "../llm.js";
+import { env } from "../../env.js";
+import { chatComplete, openaiComplete } from "../llm.js";
 import { resolveToolDef } from "./tools.js";
 import { invokeWriteTool } from "./tools.js";
 import { type ObjectiveProgress, recordUsage, type TurnContext } from "./types.js";
@@ -128,10 +129,17 @@ export async function judgeObjectives(ctx: TurnContext, node: FlowNode): Promise
 	const objLine = (o: FlowObjective): string =>
 		`- key "${o.key}": ${o.description}${o.options ? ` — allowed values: ${o.options.map((v) => `"${v}"`).join(", ")}` : ""}`;
 
-	const judgeModel = node.judge?.model ?? ctx.config.models?.judge ?? "grok-4-fast";
+	// Judge model selection, mirroring the responder's provider precedence
+	// (index.ts): an explicit per-node/per-agent override always wins; otherwise
+	// prefer OpenAI (gpt-5-mini, warmer objective judging) when OPENAI_API_KEY is
+	// set; otherwise fall back to the pre-existing xAI default.
+	const judgeOverride = node.judge?.model ?? ctx.config.models?.judge;
+	const useOpenAI = !judgeOverride && !!env.OPENAI_API_KEY;
+	const judgeModel = judgeOverride ?? (useOpenAI ? env.OPENAI_JUDGE_MODEL : "grok-4-fast");
 	let parsed: z.infer<typeof judgeOutputSchema> | null = null;
 	try {
-		const res = await chatComplete({
+		const complete = useOpenAI ? openaiComplete : chatComplete;
+		const res = await complete({
 			model: judgeModel,
 			temperature: node.judge?.temperature ?? 0,
 			maxTokens: 400,
