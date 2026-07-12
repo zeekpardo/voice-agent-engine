@@ -29,3 +29,24 @@ export function tagRulesSatisfied(tagRules: TagRules | undefined, tagSet: Set<st
 	if (tagRules.cantHave?.some((t) => tagSet.has(t))) return false;
 	return true;
 }
+
+/** Opt-out / clear "we're done" phrases that end an SMS continuation gracefully. */
+const DISENGAGE_RE =
+	/\b(stop|unsubscribe|cancel|no thanks|no thank you|not interested|leave me alone|we'?re good|i'?m good|im good|all set|nothing else|that'?s all|thats all|no more|goodbye|good ?bye|talk later)\b/i;
+/** Very short bare negatives/acks ("no", "nope", "nah", "k", "ok", "done"). */
+const SHORT_NEGATIVE_RE = /^(no|nope|nah|na|k|ok|okay|done|bye|stop)[.!\s]*$/i;
+
+/**
+ * Heuristic: does this inbound text signal the contact wants to disengage? Used
+ * ONLY by the SMS "keep the conversation going" continuation (config
+ * .continueConversation) to decide when to wrap up gracefully — it never affects
+ * the flow itself. Empty/whitespace also counts as disengagement. Intentionally
+ * conservative so continuation errs toward stopping rather than pestering; hard
+ * SMS STOP-keyword compliance still lives in the telephony/SaaS layer.
+ */
+export function isDisengageSignal(text: string): boolean {
+	const t = text.trim();
+	if (!t) return true;
+	if (SHORT_NEGATIVE_RE.test(t)) return true;
+	return DISENGAGE_RE.test(t);
+}

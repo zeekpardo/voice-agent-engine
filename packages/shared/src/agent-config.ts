@@ -851,6 +851,23 @@ export const AgentConfig = z.object({
 			model: z.string().min(1).optional(),
 		})
 		.optional(),
+
+	/**
+	 * "Keep the conversation going" — CloseBot-style rapport/upsell continuation,
+	 * TEXT/SMS only. Default OFF, so existing agents are unchanged. When enabled,
+	 * once the flow reaches its natural terminal (all required objectives gathered,
+	 * no forward node) the room-less text convo-runner does NOT end the
+	 * conversation; instead it keeps a light, natural rapport/upsell conversation
+	 * going — driven by the agent's goal/persona + the rolling summary — until the
+	 * contact clearly disengages (a short/negative reply, "no thanks", "stop", …),
+	 * then wraps up gracefully with a brief goodbye.
+	 *
+	 * Scope: the TEXT path (convo-runner). VOICE is unaffected — the terminal
+	 * end_call gating still ends calls exactly as before; this never makes a voice
+	 * call refuse to end. SaaS builder UI wiring is a follow-up; the engine honors
+	 * the flag now so it can be turned on via config.
+	 */
+	continueConversation: z.boolean().default(false),
 });
 
 export type AgentConfigT = z.infer<typeof AgentConfig>;

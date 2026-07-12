@@ -21,6 +21,35 @@ import type { ConvTurn, TurnContext } from "./types.js";
 const CONTINUITY =
 	"\n\n## CONTINUITY\nThis is ONE continuous conversation. Do not greet the person again or re-introduce yourself after it has started. Never repeat a question that was already answered — check the conversation before asking. Reply with a single, natural message; ask at most one question at a time.";
 
+/**
+ * SMS/text-native message shaping (Phase 2). The convo-runner IS the room-less
+ * text/SMS surface (voice runs in the worker), so this rides on EVERY turn here —
+ * no channel guard is needed, unlike the worker where it's gated on the text
+ * channel. It is ADDITIVE to config.responseStyle (per-agent phrasing), not a
+ * replacement: this governs the CHANNEL shape (short, texty, no IVR phrasing, no
+ * markdown), style governs the persona's voice.
+ */
+const TEXT_STYLE =
+	'\n\n## TEXTING STYLE\nThis is a text message conversation. Keep replies short and conversational, like real texting — usually 1–3 short sentences. Don\'t use phone or IVR phrasing ("press 1", "stay on the line", "one moment"). No markdown formatting. Emojis are OK if the contact uses them, sparingly. Never send a wall of text; if you must cover multiple points, keep it tight.';
+
+/**
+ * "Keep the conversation going" directive (config.continueConversation). Appended
+ * only once the flow has reached its terminal (objectives complete, no forward
+ * node) with the toggle ON, in place of ending. The goal + rolling summary are
+ * already in the prompt (persona `instructions` carries the goal; `## CONVERSATION
+ * SO FAR` carries the summary), so this just steers toward light rapport/upsell
+ * without being pushy, and always honors disengage/opt-out.
+ */
+export const CONTINUATION_DIRECTIVE =
+	"\n\n## KEEP THE CONVERSATION GOING\nYou've covered everything you needed to — don't end abruptly. Keep a light, natural conversation going: build rapport and, where it genuinely fits, explore the person's motivation, timing, or related needs you could help with. Ask at most one easy question at a time, stay helpful, and never be pushy or salesy. The moment the person signals they're done — a short or negative reply, \"no thanks\", \"stop\", \"we're good\", \"all set\" — acknowledge it warmly, wrap up in one short message, and stop.";
+
+/**
+ * Graceful wrap-up directive — used on the turn where the contact has disengaged
+ * while in continuation mode: send one short goodbye and end.
+ */
+export const WRAP_UP_DIRECTIVE =
+	"\n\n## WRAP UP\nThe person is signaling they're done. Send ONE short, warm closing message — thank them and say goodbye. Do not ask any further questions.";
+
 function contactInfoBlock(ctx: TurnContext): string {
 	if (ctx.state.contactState.length === 0) return "";
 	return `\n\n## KNOWN CONTACT INFO\nYou already know these details about the person. NEVER ask for a value shown here — if you need one, weave it in or confirm it naturally instead of asking. A field shown as UNRESOLVED is still unknown; those you MAY ask about. Never write the word "UNRESOLVED".\n${ctx.state.contactState
@@ -49,7 +78,7 @@ export function buildSystemPrompt(ctx: TurnContext, node: FlowNode | undefined):
 	const global = interp(ctx.config.instructions);
 
 	if (!node) {
-		return global + summaryBlock(ctx) + contactInfoBlock(ctx) + CONTINUITY + prohibitedBlock(ctx);
+		return global + summaryBlock(ctx) + contactInfoBlock(ctx) + CONTINUITY + TEXT_STYLE + prohibitedBlock(ctx);
 	}
 
 	const conversation = node.conversation;
@@ -90,6 +119,7 @@ export function buildSystemPrompt(ctx: TurnContext, node: FlowNode | undefined):
 		summaryBlock(ctx) +
 		contactInfoBlock(ctx) +
 		CONTINUITY +
+		TEXT_STYLE +
 		prohibitedBlock(ctx)
 	);
 }
