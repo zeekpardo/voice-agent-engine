@@ -1,6 +1,7 @@
 import type { JobContext, inference, voice } from "@livekit/agents";
 import { inference as inferenceNs, llm } from "@livekit/agents";
 import type { JSONSchema7 } from "json-schema";
+import { env } from "../env.js";
 import { slugify } from "../vendor/slugify.js";
 import type {
 	AgentBundle,
@@ -10,6 +11,26 @@ import type {
 	FlowNode,
 	ToolDef,
 } from "../gateway.js";
+
+/**
+ * TEXT-channel Claude `respond` gate. Returns the Anthropic model id to use for
+ * the caller-facing reply when the text channel should run on Claude, else null.
+ *
+ * Scoped TIGHTLY so VOICE is never touched: text channel ONLY, requires
+ * ANTHROPIC_API_KEY on the WORKER env (unset → text stays on xAI/Inference, no
+ * breakage), and yields to an explicit config.models.respond override (that
+ * always wins and stays on Inference). Both the LLM builder (flow/assemble) and
+ * the ai.turn model label (session-lifecycle) call this so they agree.
+ */
+export function anthropicRespondModel(
+	channel: DispatchMetadata["channel"],
+	config: AgentConfig,
+): string | null {
+	if (channel !== "text") return null;
+	if (!env.ANTHROPIC_API_KEY) return null;
+	if (config.models?.respond) return null;
+	return env.ANTHROPIC_TEXT_MODEL;
+}
 
 /**
  * Shared runtime context for the flow subsystem (spec §7). main.ts's entry
@@ -360,7 +381,11 @@ export interface FlowRuntimeContext {
 
 	// model/voice builders
 	buildLlm(over?: { model?: string; temperature?: number; maxTokens?: number }): inference.LLM;
-	defaultLlm: inference.LLM;
+	/** The caller-facing respond LLM. Normally an Inference LLM (grok / configured
+	 * model); on the TEXT channel with the Anthropic gate active it's the Claude
+	 * plugin LLM instead — hence the wider `llm.LLM` base type. Judge/summary/router
+	 * keep building Inference LLMs via `buildLlm` and are unaffected. */
+	defaultLlm: llm.LLM;
 	buildTts: typeof buildTts;
 	/** Per-class usage recorder (Phase 4) — bound to state.usage.record. Router
 	 * evaluations (owned by flow/router.ts, which reads ctx) tag "router" here. */

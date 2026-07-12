@@ -12,6 +12,16 @@ const schema = z.object({
 	// Control plane.
 	GATEWAY_URL: z.string().url(),
 	GATEWAY_INTERNAL_KEY: z.string().min(1),
+	// TEXT `respond` path (Claude). When ANTHROPIC_API_KEY is set on the WORKER
+	// env, the TEXT channel's caller-facing reply runs on Claude (via the LiveKit
+	// Anthropic LLM plugin) so widget-chat / test-portal text matches omnichannel
+	// quality; when unset, text stays on the xAI/Inference default (no breakage).
+	// VOICE is never affected — this gate is text-only. An explicit
+	// config.models.respond override always wins (stays on Inference).
+	ANTHROPIC_API_KEY: z.string().optional(),
+	// Claude model for the TEXT respond path (used only when ANTHROPIC_API_KEY is
+	// set and no config.models.respond override). Mirrors the gateway default.
+	ANTHROPIC_TEXT_MODEL: z.string().default("claude-sonnet-5"),
 });
 
 const parsed = schema.safeParse(process.env);
