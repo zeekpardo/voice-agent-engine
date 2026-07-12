@@ -309,6 +309,23 @@ export interface FlowRuntimeState {
 	 * met or skipped), so a looping agent is caught; on non-objective nodes every
 	 * caller turn resets it, so an open conversation is never force-ended by it. */
 	currentNodeHasObjectives?: boolean;
+	/** Node id (agent id) the current run of consecutive refused end_calls belongs
+	 * to. Together with endCallRefusalCount this powers the goodbye-loop backstop:
+	 * a gpt-4o-style model that decides the call is "done" mid-flow emits end_call
+	 * repeatedly; the first refusal steers it, but after the threshold the engine
+	 * auto-advances instead of letting the model loop goodbyes on an open line.
+	 * Reset (with the count) on every real node entry (buildFlowAgent onEnter). */
+	endCallRefusalNode?: string;
+	/** Consecutive `not_terminal_stage` end_call refusals on endCallRefusalNode.
+	 * Reset to 0 on node entry; incremented on each such refusal. At the threshold
+	 * the shared end_call tool calls state.autoAdvance instead of refusing again. */
+	endCallRefusalCount: number;
+	/** Auto-advance the CURRENT node down its primary/forward exit (the same path the
+	 * objectives judge takes). Installed by buildFlowAgent onEnter for NON-terminal
+	 * nodes only (terminal nodes leave it undefined → end_call is allowed there);
+	 * invoked by the shared end_call tool once the refusal threshold is hit so a
+	 * refused-end_call goodbye loop always makes forward progress. */
+	autoAdvance?: () => Promise<void>;
 	/** Signal genuine flow progress (node entered, objective met/skipped). Installed
 	 * by session-lifecycle to reset the no-progress backstop; a no-op until then. */
 	onProgress?: () => void;
@@ -454,6 +471,11 @@ export interface FlowRuntimeContext {
 	 * per-agent responseStyle, so replies acknowledge the prior answer and vary
 	 * their phrasing instead of templating each objective question. */
 	conversationStyle: string;
+	/** Default-on "keep leading, don't wrap up before the final stage" guidance,
+	 * injected on every NON-terminal flow node (voice + text). Stops the classic
+	 * premature-close failure where an assistant-style model treats "nothing else"
+	 * as permission to end the intake and loops goodbyes while stages remain. */
+	noEarlyWrapUp: string;
 	/** Voice-only "reply in the caller's current language" rule (empty on text). */
 	languageRules: string;
 	/** Text-only "don't read back typed values character by character" rule (empty
