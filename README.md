@@ -26,13 +26,18 @@ at runtime with the transcription gateway.
 - **Worker** (`worker/`, `worker/Dockerfile`) — the LiveKit Agents worker that
   runs each call: fetches the pinned agent config, assembles the session
   (LiveKit Inference), executes the flow (agent/objective/router/statement/
-  transfer/set_field/modify_tags/booking nodes), and reports transcript + usage.
+  scenario/true_false/switch/transfer/handoff/set_field/modify_tags/booking/
+  conversation/stop_responding nodes), and reports transcript + usage. The same
+  flow runtime drives text channels (widget/test) via a `ChannelAdapter` seam.
 
 ## Routes
 - `GET /health`
 - `/v1/agents`, `/v1/tools`, `/v1/webhooks` — agent CRUD + versioning
 - `/v1/sessions` — browser voice session (LiveKit room + token)
 - `/v1/calls`, `/v1/numbers` — outbound dispatch + inbound number registry
+- `/v1/conversations` — room-less, turn-based text conversations (SMS/omnichannel
+  backbone; one agent turn per inbound message, no LiveKit room). `GET
+  /v1/conversations/:id/events` returns the AI-log event stream (ai.turn/tool/http).
 - `/internal/*` — worker-only surface (gated by `GATEWAY_INTERNAL_KEY`)
 - `/admin/*` — key issuance (gated by `ADMIN_TOKEN`)
 
