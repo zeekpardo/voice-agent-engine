@@ -250,6 +250,13 @@ export interface FlowRuntimeState {
 	 * the call while stages remain — it must take the forward exit instead. Defaults
 	 * true (a single-agent, no-flow config is inherently terminal). */
 	currentNodeTerminal: boolean;
+	/** True once the flow has entered a `stop_responding` (park) node: the agent
+	 * has stopped responding to the contact but the session stays alive and
+	 * listening. Set by the parked agent's onEnter, cleared when a scenario routes
+	 * the contact back out. While set, no proactive/reply turn is ever spoken
+	 * (the parked agent throws StopResponse each inbound turn); the call still ends
+	 * only via the existing silence timeout (voice) or not at all (text). */
+	parked?: boolean;
 	/** Post-transfer voice: applied to every agent built after the switch. */
 	ttsOverride?: TtsInstance;
 	/** Soft per-node wrap-up timer for a conversation node's maxDurationSeconds
