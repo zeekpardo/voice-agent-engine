@@ -142,7 +142,9 @@ export interface ObjectivesDeps {
 	 * once the next node actually enters. Mirrors the transferInFlight pattern. */
 	setTransitionPending: (pending: boolean) => void;
 	/** Judge model tier (config.models.judge). Sets the DEFAULT judge model; a
-	 * per-node node.judge override still wins. Unset → grok-4-fast (unchanged). */
+	 * per-node node.judge override still wins. Unset → openai/gpt-5-mini (a
+	 * stronger structured-output model — the judge runs off the voice critical
+	 * path, and OpenAI is reachable via LiveKit Inference). */
 	judgeModel?: string;
 	/** Record one judge LLM call's usage (Phase 4 per-class metering). */
 	recordUsage: (tokensIn: number, tokensOut: number) => void;
@@ -234,7 +236,7 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 	// Destructuring it here would capture `undefined` (the value during wiring)
 	// and every transition would crash on `session.agentState`.
 	const getSession = () => deps.session;
-	const defaultJudgeLlm = buildLlm({ model: judgeModel ?? "grok-4-fast", temperature: 0, maxTokens: 400 });
+	const defaultJudgeLlm = buildLlm({ model: judgeModel ?? "openai/gpt-5-mini", temperature: 0, maxTokens: 400 });
 
 	let activeObjectives: ObjectiveRuntime | null = null;
 

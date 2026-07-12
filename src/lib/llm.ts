@@ -77,3 +77,79 @@ export async function chatComplete(opts: ChatOptions): Promise<ChatResult> {
 		},
 	};
 }
+
+/**
+ * One completion against Anthropic's Messages API (Wave: premium text models).
+ *
+ * The TEXT `respond` role can read warmer/more naturally on Claude than on the
+ * default xAI grok. The worker's VOICE path can't reach Anthropic (LiveKit
+ * Inference has no Anthropic provider), but this gateway-side turn-runner speaks
+ * plain HTTP, so it can call Anthropic directly. Same ChatOptions shape as
+ * chatComplete so the responder can swap providers with identical args; the
+ * OpenAI-style `system` message (role "system") is lifted out to Anthropic's
+ * top-level `system` param, and the remaining user/assistant turns are
+ * normalized (leading assistant turns dropped, consecutive same-role turns
+ * merged) so the request satisfies Anthropic's alternation rules.
+ *
+ * Thinking is disabled to keep replies fast and cheap (a text turn wants a
+ * direct conversational reply, not a reasoning pass). Sampling params are NOT
+ * sent — current Claude models reject non-default temperature — so the config's
+ * temperature is intentionally ignored on this path.
+ */
+export async function anthropicComplete(opts: ChatOptions): Promise<ChatResult> {
+	const system = opts.messages
+		.filter((m) => m.role === "system")
+		.map((m) => m.content)
+		.join("\n\n");
+
+	// Map to Anthropic turns, drop leading assistant turns (the first must be a
+	// user turn), and merge any consecutive same-role turns.
+	const turns: { role: "user" | "assistant"; content: string }[] = [];
+	for (const m of opts.messages) {
+		if (m.role === "system") continue;
+		const role = m.role === "assistant" ? "assistant" : "user";
+		if (turns.length === 0 && role === "assistant") continue;
+		const last = turns[turns.length - 1];
+		if (last && last.role === role) last.content += `\n\n${m.content}`;
+		else turns.push({ role, content: m.content });
+	}
+	// A turn is required; if somehow empty, seed a minimal user turn.
+	if (turns.length === 0) turns.push({ role: "user", content: "(no message)" });
+
+	const res = await fetch(`${env.ANTHROPIC_BASE_URL}/v1/messages`, {
+		method: "POST",
+		headers: {
+			"x-api-key": env.ANTHROPIC_API_KEY ?? "",
+			"anthropic-version": "2023-06-01",
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({
+			model: opts.model,
+			max_tokens: opts.maxTokens ?? 400,
+			thinking: { type: "disabled" },
+			...(system ? { system } : {}),
+			messages: turns,
+		}),
+		signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),
+	});
+
+	if (!res.ok) {
+		throw new Error(`anthropic completion failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+	}
+
+	const data = (await res.json()) as {
+		content?: { type?: string; text?: string }[];
+		usage?: { input_tokens?: number; output_tokens?: number };
+	};
+	const text = (data.content ?? [])
+		.filter((b) => b.type === "text" && typeof b.text === "string")
+		.map((b) => b.text)
+		.join("");
+	return {
+		text,
+		usage: {
+			promptTokens: data.usage?.input_tokens ?? 0,
+			completionTokens: data.usage?.output_tokens ?? 0,
+		},
+	};
+}

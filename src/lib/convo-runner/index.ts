@@ -4,7 +4,8 @@ import { jsonb, sql } from "../../db/index.js";
 import { logConversationEvent } from "../conversation-events.js";
 import { resolveGroupRef } from "../group-ref.js";
 import { newId } from "../id.js";
-import { chatComplete } from "../llm.js";
+import { env } from "../../env.js";
+import { anthropicComplete, chatComplete } from "../llm.js";
 import { recordUsage as meterUsage } from "../usage.js";
 import { allRequiredMet, armObjectives, judgeObjectives } from "./judge.js";
 import { maybeRefreshSummary, memorySettings } from "./memory.js";
@@ -304,9 +305,19 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 	if (!ended) {
 		const system = buildSystemPrompt(ctx, node);
 		const messages = buildResponderMessages(system, ctx.turns, memorySettings(ctx).windowTurns);
-		const respondModel = bundle.config.models?.respond ?? bundle.config.llm.model;
+		// Channel-aware model selection for the TEXT respond role:
+		//   1. an explicit per-agent models.respond override always wins (operator's
+		//      choice, generated via the xAI-compatible path as before);
+		//   2. otherwise, if ANTHROPIC_API_KEY is set, Claude (ANTHROPIC_TEXT_MODEL)
+		//      generates the reply — text reads warmer on Claude and this path has
+		//      no real-time latency budget;
+		//   3. otherwise fall back to the agent's default xAI model (pre-key behavior).
+		const respondOverride = bundle.config.models?.respond;
+		const useClaude = !respondOverride && !!env.ANTHROPIC_API_KEY;
+		const respondModel = respondOverride ?? (useClaude ? env.ANTHROPIC_TEXT_MODEL : bundle.config.llm.model);
 		try {
-			const res = await chatComplete({
+			const complete = useClaude ? anthropicComplete : chatComplete;
+			const res = await complete({
 				model: respondModel,
 				temperature: node?.llm?.temperature ?? bundle.config.llm.temperature,
 				maxTokens: node?.llm?.maxTokens ?? bundle.config.llm.maxTokens,
