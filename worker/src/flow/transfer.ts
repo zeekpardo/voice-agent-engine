@@ -248,6 +248,10 @@ export function createTransfer(ctx: FlowRuntimeContext, deps: TransferDeps): Tra
 					`flow: warm transfer node "${nodeId}" reached from a non-tool transition — ` +
 						`WarmTransferTask needs a function-tool context; degrading to cold SIP REFER`,
 				);
+				reportEvent(dispatch.callId, "flow.transfer_degraded_to_cold", {
+					node: nodeId,
+					target: exit?.target ?? null,
+				});
 			}
 			void coldTransfer(nodeId)
 				.catch((err) => console.error("flow: cold transfer failed", err))
