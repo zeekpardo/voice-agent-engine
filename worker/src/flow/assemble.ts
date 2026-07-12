@@ -125,13 +125,15 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 	// the hard PACING rules (one question, don't invent, don't announce stages) intact.
 	const conversationStyle =
 		'\n\n## CONVERSATIONAL STYLE\nSound like a warm, real person leading this call — not a form that reads off fields. Before you ask the next thing, briefly and SPECIFICALLY acknowledge what the caller just said (react to their actual answer), then lead naturally into your next question. Do NOT template your replies: never open consecutive replies with the same word (especially not "Thanks." every turn), and never reuse a fixed scaffold like "Could you tell me your ___". Vary your acknowledgements and sentence openers each turn, and weave the next question in conversationally instead of reciting the field name (e.g. "Perfect — and what city and zip is that in?", "Got it. Do you happen to know the square footage?"). Still ask only ONE thing per reply, never invent or assume an answer the caller did not give, and never announce stage changes.';
-	// Mid-call language alignment, LLM leg (voice only — text portals render the
-	// configured language): unconditional, no config needed. The STT leg lives in
-	// session-lifecycle's language aligner.
+	// Mid-conversation language alignment, LLM leg. Unconditional, no config needed
+	// (default-on for every agent). Voice gets the spoken wording; text/SMS gets a
+	// writing-appropriate wording so the model mirrors whatever language the user
+	// TYPES instead of defaulting to English or refusing other languages. On voice
+	// the STT leg also lives in session-lifecycle's language aligner.
 	const languageRules =
-		shared.dispatch.channel !== "text"
-			? "\n\n## LANGUAGE\nAlways reply in the language the caller is currently speaking. If they switch languages mid-conversation, switch with them immediately — same voice, no comment about the change — and stay in the new language until they switch again."
-			: "";
+		shared.dispatch.channel === "text"
+			? "\n\n## LANGUAGE\nDetect the language the user is writing in and ALWAYS reply in that same language. Support any language. If the user switches languages mid-conversation, switch with them immediately and continue in the new language, without commenting on the change. Only use English if the user is writing in English."
+			: "\n\n## LANGUAGE\nAlways reply in the language the caller is currently speaking. If they switch languages mid-conversation, switch with them immediately — same voice, no comment about the change — and stay in the new language until they switch again.";
 	// Text channel: the user TYPES their answers, so read-back confirmations that
 	// make sense on a voice call (spelling out a phone number or email digit by
 	// digit) are pointless and awkward. Suppress them on text only; voice keeps the

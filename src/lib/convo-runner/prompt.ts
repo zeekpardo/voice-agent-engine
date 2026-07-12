@@ -45,6 +45,17 @@ const NO_READBACK =
 	'\n\n## TYPED VALUES\nThe person TYPED their answers, so you already have the EXACT spelling — there is no transcription error to correct. NEVER phonetically spell out or read back a value character by character, digit by digit, or word by word (do NOT turn "bmoore@gmail.com" into "b moore at g mail dot com"). NEVER echo a phone number, email, or address back for confirmation, and do NOT ask the person to confirm ANY value they just typed — take typed values exactly as given. Only re-ask when a value is genuinely missing or truly ambiguous.';
 
 /**
+ * Mirror-of-the-worker language directive for the room-less text/SMS surface. The
+ * convo-runner IS the text/SMS path, so this rides on EVERY turn (no channel guard,
+ * like TEXT_STYLE / NO_READBACK) and is default-on for every agent — no config field.
+ * Writing-appropriate wording (detect what the user TYPES, reply in kind) so SMS
+ * threads switch languages with the user instead of defaulting to English or refusing.
+ * Matches the worker's text-channel `## LANGUAGE` block in worker/src/flow/assemble.ts.
+ */
+const TEXT_LANGUAGE =
+	"\n\n## LANGUAGE\nDetect the language the user is writing in and ALWAYS reply in that same language. Support any language. If the user switches languages mid-conversation, switch with them immediately and continue in the new language, without commenting on the change. Only use English if the user is writing in English.";
+
+/**
  * "Keep the conversation going" directive (config.continueConversation). Appended
  * only once the flow has reached its terminal (objectives complete, no forward
  * node) with the toggle ON, in place of ending. The goal + rolling summary are
@@ -131,6 +142,7 @@ export function buildSystemPrompt(ctx: TurnContext, node: FlowNode | undefined):
 			CONTINUITY +
 			TEXT_STYLE +
 			NO_READBACK +
+			TEXT_LANGUAGE +
 			responseStyleBlock(ctx) +
 			prohibitedBlock(ctx)
 		);
@@ -177,6 +189,7 @@ export function buildSystemPrompt(ctx: TurnContext, node: FlowNode | undefined):
 		CONTINUITY +
 		TEXT_STYLE +
 		NO_READBACK +
+		TEXT_LANGUAGE +
 		responseStyleBlock(ctx) +
 		prohibitedBlock(ctx)
 	);
