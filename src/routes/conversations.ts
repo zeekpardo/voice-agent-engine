@@ -2,6 +2,7 @@ import { ContactState, ContactTags } from "@voice-engine/shared/agent-config";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv } from "../app-types.js";
+import { sql } from "../db/index.js";
 import { AppError } from "../lib/errors.js";
 import { parseBody } from "../lib/http.js";
 import {
@@ -108,6 +109,25 @@ conversations.get("/conversations/:id", async (c) => {
 	if (!row) throw notFound();
 	const messages = await listMessages(row.id);
 	return c.json({ conversation: present(row), messages });
+});
+
+// Per-turn engine trace — the AI/tool/http diagnostics the convo-runner writes
+// to conversation_events (ai.turn respond/judge/summary/router, tool.*,
+// http.request, flow breadcrumbs). Mirrors GET /v1/calls/:id/events: same auth,
+// same limit/newest-kept semantics, returns the chronological events array.
+conversations.get("/conversations/:id/events", async (c) => {
+	const key = c.get("apiKey");
+	const row = await getConversation(key.project, c.req.param("id"));
+	if (!row) throw notFound();
+	// Bounded: ai.turn events carry prompt/completion payloads, so an unbounded
+	// read of a long conversation could be several MB. Chronological; the newest
+	// rows win when the cap bites (they're shown first in the AI-logs panel).
+	const limit = Math.min(Number(c.req.query("limit") ?? 500) || 500, 2000);
+	const rows = await sql`
+		SELECT type, payload, created_at FROM conversation_events
+		WHERE conversation_id = ${row.id}
+		ORDER BY created_at DESC LIMIT ${limit}`;
+	return c.json({ conversation_id: row.id, events: rows.reverse() });
 });
 
 // Append a user message and run one turn.
