@@ -79,6 +79,50 @@ export async function chatComplete(opts: ChatOptions): Promise<ChatResult> {
 }
 
 /**
+ * One chat completion against OpenAI's real chat-completions API (Wave: text
+ * judge on gpt-5-mini). Only used by the gateway-side TEXT judge — the
+ * worker's VOICE judge already reaches OpenAI via LiveKit Inference.
+ *
+ * Same OpenAI-compatible request/response shape as chatComplete, so this
+ * reuses ChatOptions/ChatResult, but hits api.openai.com with OPENAI_API_KEY
+ * instead of xAI. gpt-5 family models reject non-default sampling params
+ * (like current Claude rejects them on anthropicComplete), so temperature is
+ * NOT sent — the config's temperature is intentionally ignored on this path.
+ */
+export async function openaiComplete(opts: ChatOptions): Promise<ChatResult> {
+	const res = await fetch(`${env.OPENAI_BASE_URL}/chat/completions`, {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${env.OPENAI_API_KEY ?? ""}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({
+			model: opts.model,
+			max_completion_tokens: opts.maxTokens ?? 400,
+			...(opts.json ? { response_format: { type: "json_object" } } : {}),
+			messages: opts.messages,
+		}),
+		signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),
+	});
+
+	if (!res.ok) {
+		throw new Error(`openai completion failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+	}
+
+	const data = (await res.json()) as {
+		choices?: { message?: { content?: string } }[];
+		usage?: { prompt_tokens?: number; completion_tokens?: number };
+	};
+	return {
+		text: data.choices?.[0]?.message?.content ?? "",
+		usage: {
+			promptTokens: data.usage?.prompt_tokens ?? 0,
+			completionTokens: data.usage?.completion_tokens ?? 0,
+		},
+	};
+}
+
+/**
  * One completion against Anthropic's Messages API (Wave: premium text models).
  *
  * The TEXT `respond` role can read warmer/more naturally on Claude than on the

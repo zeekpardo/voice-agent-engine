@@ -27,6 +27,17 @@ const schema = z.object({
 	// Claude model for the TEXT respond path (used only when ANTHROPIC_API_KEY is
 	// set and the agent has no explicit models.respond override).
 	ANTHROPIC_TEXT_MODEL: z.string().default("claude-sonnet-5"),
+	// OpenAI. Optional — powers the premium TEXT objective JUDGE path (mirrors
+	// the ANTHROPIC_API_KEY story above but for judging, not responding). When
+	// OPENAI_API_KEY is set, text conversations whose node/agent has no explicit
+	// judge model override are judged by OpenAI (OPENAI_JUDGE_MODEL, default
+	// gpt-5-mini) instead of the xAI default; when it is UNSET the text judge
+	// falls back to xAI (grok-4-fast), so the gateway boots and runs normally
+	// without the key. The WORKER's VOICE judge already reaches OpenAI via
+	// LiveKit Inference — this only wires the gateway-side TEXT judge.
+	OPENAI_API_KEY: z.string().optional(),
+	OPENAI_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
+	OPENAI_JUDGE_MODEL: z.string().default("gpt-5-mini"),
 	TRANSLATE_MAX_TOKENS: z.coerce.number().int().positive().default(4096),
 	// Admin API (key issuance + usage). If unset, /admin routes are disabled.
 	ADMIN_TOKEN: z.string().optional(),
