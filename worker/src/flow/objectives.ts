@@ -290,11 +290,18 @@ const normalizeObjectiveAnswer = (o: FlowObjective, answer: string): string => {
 	return answer;
 };
 
-/** A name-shaped field key (first_name, last_name, full_name, contact_name, …).
- * Consistent with the existing generic email/phone field heuristics above — no
- * CRM/business mapping, just the shape of the key. Used ONLY to reconcile a
- * name value captured under one key with a target objective asking under another. */
-const isNameField = (field: string): boolean => /name/i.test(field);
+/** Field keys that contain "name" but are NOT a person's name (so a captured
+ * caller name must never carry over into them): business/entity/property/etc. */
+const NON_PERSON_NAME_FIELD =
+	/(entity|business|compan|corp|llc|organi|trust|brand|product|propert|street|account|campaign|project|event|file|domain|username)/i;
+
+/** A PERSON name-shaped field key (first_name, last_name, full_name, contact_name,
+ * …) — but not entity_name/business_name/property_name/etc. Consistent with the
+ * generic email/phone field heuristics above — no CRM/business mapping, just the
+ * shape of the key. Used ONLY to reconcile a person-name value captured under one
+ * key with a target objective asking under another (first_name → full_name). */
+const isNameField = (field: string): boolean =>
+	/name/i.test(field) && !NON_PERSON_NAME_FIELD.test(field);
 
 /**
  * In-call carryover resolution: has this objective's value ALREADY been captured
