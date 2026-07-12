@@ -302,6 +302,50 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 		const wrapUpEndsCall = isConversation && conversation!.wrapUp.mode === "end_call";
 		const isTerminalNode = wrapUpEndsCall || !primaryForwardExit || !primaryForwardExit.target;
 
+		// Goodbye-loop backstop (installed on state below, for NON-terminal nodes only).
+		// When the model repeatedly calls end_call on a non-terminal node — clearly
+		// wanting to move on / thinking it's done — the shared end_call tool invokes
+		// this after the refusal threshold to take THIS node's forward exit
+		// programmatically, mirroring the objectives judge's transition switch. Any
+		// still-pending objectives are simply abandoned (the next node re-arms the
+		// judge), so the flow proceeds toward its terminal stage instead of hanging
+		// open. The forward target is the engine's primary exit (the objectives primary
+		// for objective nodes, else the first non-gated exit) — the same one the judge
+		// or the model's forward exit would take.
+		const autoAdvanceForwardExit = hasObjectives ? objectivesPrimary : nonGatedExits[0];
+		const autoAdvanceTarget = autoAdvanceForwardExit?.target ?? primaryForwardExit?.target;
+		const autoAdvanceForward = async (): Promise<void> => {
+			const session = ctx.state.session;
+			if (!session || ctx.isCompleted()) return;
+			if (session.currentAgent.id !== `node:${node.id}`) return; // already moved on
+			reportEvent(dispatch.callId, "flow.exit", {
+				node: node.id,
+				exit: autoAdvanceForwardExit?.name ?? "end",
+				target: autoAdvanceTarget ?? null,
+				via: "autoadvance",
+			});
+			// The node's outcome is a forced advance, not a satisfied exit.
+			ctx.recordNodeResult(node.id, { result: "auto_advanced", succeeded: false });
+			// Commit the transition before the async resolve/swap so a same-turn end_call
+			// is refused rather than killing the call mid-advance (cleared on node entry).
+			ctx.state.transitionPending = true;
+			ctx.state.lastTransitionAt = Date.now();
+			const resolved = await resolveTarget(autoAdvanceTarget);
+			if (resolved.kind === "agent") {
+				const nextCtx = session.currentAgent.chatCtx.copy({ excludeInstructions: true });
+				session.updateAgent(buildFlowAgent(resolved.id, nextCtx));
+			} else if (resolved.kind === "park") {
+				const nextCtx = session.currentAgent.chatCtx.copy({ excludeInstructions: true });
+				session.updateAgent(buildParkedAgent(nextCtx));
+			} else if (resolved.kind === "end" || resolved.kind === "end_after_speech") {
+				await ctx.hangUp("flow_complete");
+			} else if (resolved.kind === "transfer") {
+				startTransfer(resolved.nodeId);
+			} else if (resolved.kind === "handoff") {
+				startHandoff({ agentId: resolved.agentId, fromNode: resolved.fromNode, transition: resolved.transition });
+			}
+		};
+
 		const exitNames = toolExits.map((e) => `exit_${sanitize(e.name)}`).join(", ");
 		return voice.Agent.create({
 			id: `node:${node.id}`,
@@ -329,8 +373,9 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				summaryBlock +
 				contactInfo +
 				wrapUpBlock +
+				(!isTerminalNode ? ctx.noEarlyWrapUp : "") +
 				(!isConversation && toolExits.length > 0
-					? `\n\n## MOVING BETWEEN STAGES\nThis call flows through several stages and you handle ONLY this one. The moment the conversation satisfies an exit condition, call that exit tool (${exitNames}) IMMEDIATELY and SILENTLY. Changing stages is invisible to the caller: do NOT wrap up, do NOT say goodbye or "thanks for your time", do NOT announce a transfer or say you're passing them along — the very same voice simply continues the conversation.`
+					? `\n\n## MOVING BETWEEN STAGES\nThis call flows through several stages and you handle ONLY this one. The moment the conversation satisfies an exit condition, call that exit tool (${exitNames}) IMMEDIATELY and SILENTLY. Changing stages is invisible to the caller: do NOT wrap up, do NOT say goodbye or "thanks for your time", do NOT announce a transfer or say you're passing them along — the very same voice simply continues the conversation. When this stage's goal is met, move on to the next stage — never close the call or ask if there's "anything else" while any stage remains.`
 					: "") +
 				(scenarios.length > 0
 					? `\n\n## SCENARIOS\nThese scenario exits override your stage goal — call one the moment its condition appears: ${scenarios
@@ -369,6 +414,14 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				// A fresh node's objectives are not yet complete — reset the
 				// terminal-for-end_call override the previous node may have set.
 				ctx.state.currentNodeObjectivesComplete = false;
+				// Goodbye-loop backstop: expose THIS node's forward auto-advance to the
+				// shared end_call tool (only for non-terminal nodes — a terminal node has
+				// no forward exit, so end_call is legitimately allowed there and gets no
+				// auto-advance). Entering a node is real progress, so reset the consecutive
+				// refused-end_call counter — refusals only accumulate within one node.
+				ctx.state.autoAdvance = isTerminalNode ? undefined : autoAdvanceForward;
+				ctx.state.endCallRefusalNode = undefined;
+				ctx.state.endCallRefusalCount = 0;
 				// No-progress backstop governance: on an objective node the backstop only
 				// resets on real flow progress (this entry, or an objective met/skipped),
 				// so a looping agent is caught; on non-objective nodes every caller turn
@@ -567,6 +620,11 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				ctx.state.currentNodeTerminal = false;
 				ctx.state.currentNodeObjectivesComplete = false;
 				ctx.state.transitionPending = false;
+				// Park has no forward exit and no end_call tool: never auto-advance from
+				// here, and drop any prior node's counter/hook.
+				ctx.state.autoAdvance = undefined;
+				ctx.state.endCallRefusalNode = undefined;
+				ctx.state.endCallRefusalCount = 0;
 				// Not an objective node: caller turns reset the no-progress backstop so a
 				// parked contact isn't force-ended by it (park end is governed below / by
 				// maxCall). Entering park is itself progress.

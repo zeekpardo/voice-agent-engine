@@ -125,6 +125,15 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 	// the hard PACING rules (one question, don't invent, don't announce stages) intact.
 	const conversationStyle =
 		'\n\n## CONVERSATIONAL STYLE\nSound like a warm, real person leading this call — not a form that reads off fields. Before you ask the next thing, briefly and SPECIFICALLY acknowledge what the caller just said (react to their actual answer), then lead naturally into your next question. Do NOT template your replies: never open consecutive replies with the same word (especially not "Thanks." every turn), and never reuse a fixed scaffold like "Could you tell me your ___". Vary your acknowledgements and sentence openers each turn, and weave the next question in conversationally instead of reciting the field name (e.g. "Perfect — and what city and zip is that in?", "Got it. Do you happen to know the square footage?"). Still ask only ONE thing per reply, never invent or assume an answer the caller did not give, and never announce stage changes.';
+	// Premature-wrap-up guard (default-on, voice + text) — injected on every
+	// NON-terminal flow node. The classic regression: an assistant-style model
+	// (e.g. gpt-4o) treats the caller saying "that's all / nothing else" as
+	// permission to end the intake, so it closes and loops goodbyes while stages
+	// and objectives are still pending. This keeps the model LEADING until the flow
+	// actually reaches its final stage. Model-agnostic; sits alongside (not over)
+	// the hard PACING rules (one question, don't invent answers).
+	const noEarlyWrapUp =
+		'\n\n## KEEP LEADING — DO NOT WRAP UP YET\nThis intake is NOT finished — there are more stages and details still to cover. Until the flow reaches its final stage, you must NOT wrap up: never say goodbye, never thank-and-close, never ask "is there anything else" or "can I help with anything else", and never try to end the call. If the caller says "that\'s all", "nothing else", or "no more questions", that only answers your CURRENT question — it is NOT permission to end the intake, so keep going. Your job is to keep leading: ask this stage\'s next question until its goal is captured, then take the exit. Only the final stage closes the call and says goodbye.';
 	// Mid-conversation language alignment, LLM leg. Unconditional, no config needed
 	// (default-on for every agent). Voice gets the spoken wording; text/SMS gets a
 	// writing-appropriate wording so the model mirrors whatever language the user
@@ -230,6 +239,33 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 			// the current node's objectives are all met/skipped it is terminal-for-end_call
 			// too, so a satisfied node whose transition somehow stalls can still close.
 			if (state.currentNodeTerminal === false && state.currentNodeObjectivesComplete !== true) {
+				// Goodbye-loop backstop: a model that keeps deciding the call is "done"
+				// mid-flow emits end_call over and over. The FIRST refusal steers it (below,
+				// unchanged). But if it just loops goodbyes, nothing advances and the line
+				// hangs open until the caller gives up. Track consecutive refused end_calls
+				// on the SAME non-terminal node; after the 2nd, AUTO-ADVANCE down this node's
+				// forward exit (installed by buildFlowAgent onEnter) instead of refusing
+				// again. The node/count reset on the next node's entry. Terminal nodes never
+				// reach here (currentNodeTerminal===true → end_call succeeds), so autoAdvance
+				// being set already means a forward exit exists.
+				const nodeId = state.session?.currentAgent?.id ?? undefined;
+				if (state.endCallRefusalNode === nodeId) {
+					state.endCallRefusalCount += 1;
+				} else {
+					state.endCallRefusalNode = nodeId;
+					state.endCallRefusalCount = 1;
+				}
+				if (state.endCallRefusalCount >= 2 && state.autoAdvance) {
+					reportEvent(dispatch.callId, "flow.autoadvance_on_endcall", {
+						node: nodeId ?? null,
+						attempts: state.endCallRefusalCount,
+					});
+					// Fire the forward transition (async swap); return a steering string so
+					// the model continues rather than hanging up. The counter is cleared when
+					// the next node enters.
+					void state.autoAdvance();
+					return { message: "Moving on to the next part of the call now." };
+				}
 				return refuse(
 					"not_terminal_stage",
 					"There are more stages in this conversation — do not end the call. Take the appropriate exit to continue; only use end_call from the final stage, after you've said goodbye.",
@@ -368,6 +404,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		globalInstructions,
 		pacingRules,
 		conversationStyle,
+		noEarlyWrapUp,
 		languageRules,
 		textRules,
 		textStyle,

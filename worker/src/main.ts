@@ -122,6 +122,7 @@ export default defineAgent({
 			transferInFlight: false,
 			transitionPending: false,
 			currentNodeTerminal: true,
+			endCallRefusalCount: 0,
 			ttsOverride: undefined,
 			conversationTimer: undefined,
 			usage: createUsageRecorder(),
