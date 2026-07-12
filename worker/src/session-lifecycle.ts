@@ -619,9 +619,13 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 
 	// 6. Engine-enforced timeouts (spec §4). Max-duration applies to both
 	// channels; the silence timer becomes a (longer) inactivity timeout on text.
+	// Fall back to the schema defaults at the READ site: agent configs published
+	// before these fields existed are dispatched to the worker without them, so a
+	// bare `field * 1000` yields NaN and setTimeout fires on the next tick —
+	// hanging up every call the instant it connects. (Matches noAnswerSeconds ?? 25.)
 	const maxCallTimer = setTimeout(() => {
 		void state.hangUp("max_duration");
-	}, config.timeouts.maxCallSeconds * 1000);
+	}, (config.timeouts.maxCallSeconds ?? 900) * 1000);
 
 	let silenceTimer: NodeJS.Timeout | undefined;
 	const idleMs = channel.idleTimeoutSeconds * 1000;
@@ -644,14 +648,15 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	// stuck OBJECTIVE node force-ends after noProgressSeconds. On non-objective nodes
 	// (conversation / single-agent) every caller turn counts as progress, so a
 	// legitimate open conversation is never cut here (silence + maxCall govern it).
-	const noProgressMs = config.timeouts.noProgressSeconds * 1000;
+	const noProgressSeconds = config.timeouts.noProgressSeconds ?? 180;
+	const noProgressMs = noProgressSeconds * 1000;
 	let noProgressTimer: NodeJS.Timeout | undefined;
 	const resetNoProgress = () => {
 		if (noProgressTimer) clearTimeout(noProgressTimer);
 		noProgressTimer = setTimeout(() => {
 			reportEvent(dispatch.callId, "flow.no_progress_timeout", {
 				node: session.currentAgent?.id ?? null,
-				seconds: config.timeouts.noProgressSeconds,
+				seconds: noProgressSeconds,
 			});
 			void state.hangUp("no_progress");
 		}, noProgressMs);
