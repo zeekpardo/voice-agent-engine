@@ -585,12 +585,14 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				if (ctx.state.parkEndTimer) clearTimeout(ctx.state.parkEndTimer);
 				ctx.state.parkEndTimer = undefined;
 				if (ctx.dispatch.channel !== "text") {
-					const parkEndMs = ctx.config.timeouts.silenceHangupSeconds * 1000;
+					// Read-site default: legacy configs may omit the field (NaN → instant hangup).
+					const parkEndSeconds = ctx.config.timeouts.silenceHangupSeconds ?? 30;
+					const parkEndMs = parkEndSeconds * 1000;
 					ctx.state.parkEndTimer = setTimeout(() => {
 						ctx.state.parkEndTimer = undefined;
 						if (ctx.state.completed) return;
 						if (ctx.state.session?.currentAgent.id !== "park") return; // routed out
-						reportEvent(dispatch.callId, "flow.park_timeout", { seconds: ctx.config.timeouts.silenceHangupSeconds });
+						reportEvent(dispatch.callId, "flow.park_timeout", { seconds: parkEndSeconds });
 						void ctx.hangUp("park_timeout");
 					}, parkEndMs);
 				}
