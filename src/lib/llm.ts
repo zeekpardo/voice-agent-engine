@@ -34,6 +34,11 @@ export interface ChatOptions {
 	maxTokens?: number;
 	/** Force a JSON object response (used by the objectives judge). */
 	json?: boolean;
+	/** Reasoning-model effort hint (gpt-5 family / o-series). Only honored by
+	 * openaiComplete. "minimal" keeps a reasoning model from spending its whole
+	 * completion budget on hidden reasoning tokens and truncating the JSON — the
+	 * objective-judge wedge. Omitted → provider default. */
+	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high";
 	/** Per-call timeout; defaults to 30s (spoken-length replies are short). */
 	timeoutMs?: number;
 }
@@ -100,6 +105,7 @@ export async function openaiComplete(opts: ChatOptions): Promise<ChatResult> {
 			model: opts.model,
 			max_completion_tokens: opts.maxTokens ?? 400,
 			...(opts.json ? { response_format: { type: "json_object" } } : {}),
+			...(opts.reasoningEffort ? { reasoning_effort: opts.reasoningEffort } : {}),
 			messages: opts.messages,
 		}),
 		signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),

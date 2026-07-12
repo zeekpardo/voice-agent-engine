@@ -33,6 +33,18 @@ const TEXT_STYLE =
 	'\n\n## TEXTING STYLE\nThis is a text message conversation. Keep replies short and conversational, like real texting — usually 1–3 short sentences. Don\'t use phone or IVR phrasing ("press 1", "stay on the line", "one moment"). No markdown formatting. Emojis are OK if the contact uses them, sparingly. Never send a wall of text; if you must cover multiple points, keep it tight.';
 
 /**
+ * No read-back / no-confirm on the text channel. The person TYPED their answers, so
+ * the exact spelling is already known — there is no transcription error to catch, and
+ * voice-style phonetic read-back ("b moore at g mail dot com" for "bmoore@gmail.com")
+ * or asking them to confirm a value they just typed is pointless and awkward. The
+ * convo-runner IS the text/SMS surface, so this rides on every turn (no channel guard,
+ * like TEXT_STYLE). Mirrors the worker's text-channel `## TEXT CHAT` rule so voice-test
+ * text and omnichannel SMS behave identically.
+ */
+const NO_READBACK =
+	'\n\n## TYPED VALUES\nThe person TYPED their answers, so you already have the EXACT spelling — there is no transcription error to correct. NEVER phonetically spell out or read back a value character by character, digit by digit, or word by word (do NOT turn "bmoore@gmail.com" into "b moore at g mail dot com"). NEVER echo a phone number, email, or address back for confirmation, and do NOT ask the person to confirm ANY value they just typed — take typed values exactly as given. Only re-ask when a value is genuinely missing or truly ambiguous.';
+
+/**
  * "Keep the conversation going" directive (config.continueConversation). Appended
  * only once the flow has reached its terminal (objectives complete, no forward
  * node) with the toggle ON, in place of ending. The goal + rolling summary are
@@ -118,6 +130,7 @@ export function buildSystemPrompt(ctx: TurnContext, node: FlowNode | undefined):
 			contactInfoBlock(ctx) +
 			CONTINUITY +
 			TEXT_STYLE +
+			NO_READBACK +
 			responseStyleBlock(ctx) +
 			prohibitedBlock(ctx)
 		);
@@ -163,6 +176,7 @@ export function buildSystemPrompt(ctx: TurnContext, node: FlowNode | undefined):
 		contactInfoBlock(ctx) +
 		CONTINUITY +
 		TEXT_STYLE +
+		NO_READBACK +
 		responseStyleBlock(ctx) +
 		prohibitedBlock(ctx)
 	);

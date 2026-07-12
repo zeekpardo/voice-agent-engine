@@ -271,6 +271,28 @@ export interface FlowRuntimeState {
 	 * the call while stages remain — it must take the forward exit instead. Defaults
 	 * true (a single-agent, no-flow config is inherently terminal). */
 	currentNodeTerminal: boolean;
+	/** True once the CURRENT objective node's required objectives are all met or
+	 * skipped (published by the objectives tracker when it commits to advancing;
+	 * reset to false on every node entry). Read by the shared end_call tool as a
+	 * SECOND terminal signal: once a node's data goals are satisfied, a model-driven
+	 * end_call is legitimate even if the node has a forward exit, so a stuck
+	 * transition can't trap the call open. */
+	currentNodeObjectivesComplete?: boolean;
+	/** Whether the CURRENT node is an objective node (published by buildFlowAgent /
+	 * the parked agent onEnter). Governs the no-progress backstop: on an objective
+	 * node the backstop only resets on real flow progress (node change / objective
+	 * met or skipped), so a looping agent is caught; on non-objective nodes every
+	 * caller turn resets it, so an open conversation is never force-ended by it. */
+	currentNodeHasObjectives?: boolean;
+	/** Signal genuine flow progress (node entered, objective met/skipped). Installed
+	 * by session-lifecycle to reset the no-progress backstop; a no-op until then. */
+	onProgress?: () => void;
+	/** Explicit park-end timer (VOICE only). A `stop_responding` node stops the agent
+	 * but keeps the line open; the ordinary silence timeout resets on caller turns, so
+	 * a chatty caller could hold a parked VOICE call open indefinitely. This timer,
+	 * armed on park entry and NOT reset by turns, force-ends the parked voice call.
+	 * Text parks indefinitely (governed by inactivity + maxCall). */
+	parkEndTimer?: ReturnType<typeof setTimeout>;
 	/** True once the flow has entered a `stop_responding` (park) node: the agent
 	 * has stopped responding to the contact but the session stays alive and
 	 * listening. Set by the parked agent's onEnter, cleared when a scenario routes
@@ -380,7 +402,13 @@ export interface FlowRuntimeContext {
 	recordNodeResult(nodeId: string, fields: { result?: string; succeeded?: boolean }): void;
 
 	// model/voice builders
-	buildLlm(over?: { model?: string; temperature?: number; maxTokens?: number }): inference.LLM;
+	buildLlm(over?: {
+		model?: string;
+		temperature?: number;
+		maxTokens?: number;
+		json?: boolean;
+		reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high";
+	}): inference.LLM;
 	/** The caller-facing respond LLM. Normally an Inference LLM (grok / configured
 	 * model); on the TEXT channel with the Anthropic gate active it's the Claude
 	 * plugin LLM instead — hence the wider `llm.LLM` base type. Judge/summary/router
