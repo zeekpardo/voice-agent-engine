@@ -10,7 +10,7 @@ import { recordUsage as meterUsage } from "../usage.js";
 import { aiTurnEvent, providerFromModel } from "./ai-log.js";
 import { allRequiredMet, armObjectives, judgeObjectives } from "./judge.js";
 import { maybeRefreshSummary, memorySettings } from "./memory.js";
-import { buildResponderMessages, buildSystemPrompt } from "./prompt.js";
+import { buildResponderMessages, buildSystemPrompt, CONTINUATION_DIRECTIVE, WRAP_UP_DIRECTIVE } from "./prompt.js";
 import { resolveTarget } from "./router.js";
 import {
 	type ConversationState,
@@ -22,7 +22,7 @@ import {
 	type TurnContext,
 	type UsageByClass,
 } from "./types.js";
-import { tagRulesSatisfied } from "./util.js";
+import { isDisengageSignal, tagRulesSatisfied } from "./util.js";
 
 /**
  * Room-less, turn-based conversation runner (Wave 1b).
@@ -96,6 +96,18 @@ interface AgentBundle {
 }
 
 const RESPONDER_TIMEOUT_MS = 30_000;
+
+/**
+ * Soft output ceiling for the TEXT respond call (Phase 2 SMS shaping). Text
+ * replies should stay tight (1–3 short sentences ≈ a single SMS segment); the
+ * "## TEXTING STYLE" directive does the real work, but capping max output tokens
+ * is a cheap, low-risk guard against a runaway wall-of-text reply. It only ever
+ * LOWERS the effective ceiling (min with the configured value), so an agent that
+ * deliberately sets a smaller maxTokens keeps it. No hard truncation of the text
+ * is done anywhere — that would cut mid-sentence. ~180 tokens ≈ 700–800 chars,
+ * comfortably above a normal texty reply while still discouraging essays.
+ */
+const TEXT_RESPOND_MAX_TOKENS = 180;
 
 // ── loaders ──────────────────────────────────────────────────────────────────
 
@@ -291,6 +303,16 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 	let node = currentNode(bundle.config, nodeId);
 	let status = "active";
 	let ended = false;
+	// "Keep the conversation going" (config.continueConversation, default off).
+	// A conversation is PAST TERMINAL when it has a flow but no active node — the
+	// flow already ran to its end on an earlier turn and we've been holding it open
+	// for rapport/upsell. `inContinuation` marks the reply as a continuation turn
+	// (append the directive); `wrapUp` means "generate ONE graceful goodbye and
+	// then end" (used when the contact disengages).
+	const continuationOn = bundle.config.continueConversation === true;
+	const wasPastTerminal = !!bundle.config.flow && !nodeId;
+	let wrapUp = false;
+	let inContinuation = false;
 	const saySoFar: string[] = [];
 	// Agent-handoff bookkeeping: the active agent id/version can change mid-turn.
 	let agentId = conversation.agent_id;
@@ -319,8 +341,22 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 				} else if (resolved.kind === "end") {
 					node = undefined;
 					nodeId = null;
-					status = "ended";
-					ended = true;
+					if (continuationOn && !isDisengageSignal(text)) {
+						// Toggle ON: hold the conversation open for rapport/upsell
+						// instead of ending. The responder below generates a
+						// continuation turn (flow-less prompt + CONTINUATION_DIRECTIVE).
+						inContinuation = true;
+						ctx.events.push({ type: "conversation.continuation", payload: { trigger: "flow_end" } });
+					} else {
+						status = "ended";
+						ended = true;
+						// Toggle ON but the terminating message already disengaged:
+						// still send ONE graceful goodbye, then end.
+						if (continuationOn) {
+							inContinuation = true;
+							wrapUp = true;
+						}
+					}
 				} else if (resolved.kind === "handoff") {
 					// Agent handoff (text): swap the active agent to the target and
 					// continue. Announced → bridge + target entry greeting (two
@@ -361,13 +397,29 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 			// Conversation-mode nodes are objective-less and self-close via a
 			// model-driven wrapUp exit — deferred in v1; they just converse.
 		}
+	} else if (continuationOn && wasPastTerminal) {
+		// Subsequent continuation turn: the flow already ended on an earlier turn
+		// and we've been holding the conversation open (toggle ON). Keep the
+		// rapport/upsell going, or — on a clear disengage signal — send one
+		// graceful goodbye and end.
+		inContinuation = true;
+		if (isDisengageSignal(text)) {
+			wrapUp = true;
+			status = "ended";
+			ended = true;
+			ctx.events.push({ type: "conversation.continuation_end", payload: { reason: "disengaged" } });
+		}
 	}
 
 	// ── generate the reply from the resulting node (unless ended, or the reply
 	// was already produced by a handoff bridge/greeting) ─
+	// When in continuation mode we still generate a reply even though `ended` is
+	// set for a wrap-up — that's the graceful goodbye.
 	let reply: string | null = null;
-	if (!ended && !skipResponder) {
-		const messages = buildResponderMessages(buildSystemPrompt(ctx, node), ctx.turns, memorySettings(ctx).windowTurns);
+	if ((!ended || wrapUp) && !skipResponder) {
+		let system = buildSystemPrompt(ctx, node);
+		if (inContinuation) system += wrapUp ? WRAP_UP_DIRECTIVE : CONTINUATION_DIRECTIVE;
+		const messages = buildResponderMessages(system, ctx.turns, memorySettings(ctx).windowTurns);
 		reply = await respond(ctx, bundle, node, messages);
 	}
 
@@ -473,10 +525,13 @@ async function respond(
 	const respondModel = respondOverride ?? (useClaude ? env.ANTHROPIC_TEXT_MODEL : bundle.config.llm.model);
 	try {
 		const complete = useClaude ? anthropicComplete : chatComplete;
+		// Text is the only channel here, so cap output at the SMS ceiling (only ever
+		// lowers the configured value — see TEXT_RESPOND_MAX_TOKENS).
+		const configuredMaxTokens = node?.llm?.maxTokens ?? bundle.config.llm.maxTokens;
 		const res = await complete({
 			model: respondModel,
 			temperature: node?.llm?.temperature ?? bundle.config.llm.temperature,
-			maxTokens: node?.llm?.maxTokens ?? bundle.config.llm.maxTokens,
+			maxTokens: Math.min(configuredMaxTokens, TEXT_RESPOND_MAX_TOKENS),
 			messages,
 			timeoutMs: RESPONDER_TIMEOUT_MS,
 		});

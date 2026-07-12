@@ -131,6 +131,13 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		shared.dispatch.channel === "text"
 			? "\n\n## TEXT CHAT\nThis is a text chat, not a phone call. The user TYPED their answers, so you already have their exact spelling. NEVER spell out, read back, or ask them to confirm phone numbers, emails, or addresses character by character or digit by digit — accept typed values exactly as given. Skip voice-style read-back confirmations; only re-ask when a value is genuinely missing or ambiguous."
 			: "";
+	// SMS/text-native message shaping (Phase 2). Text-channel only (voice untouched);
+	// additive to responseStyle. Mirrors the convo-runner's TEXT_STYLE so the widget/
+	// test text surface shapes replies the same way the omnichannel SMS path does.
+	const textStyle =
+		shared.dispatch.channel === "text"
+			? '\n\n## TEXTING STYLE\nThis is a text message conversation. Keep replies short and conversational, like real texting — usually 1–3 short sentences. Don\'t use phone or IVR phrasing ("press 1", "stay on the line", "one moment"). No markdown formatting. Emojis are OK if the person uses them, sparingly. Never send a wall of text; if you must cover multiple points, keep it tight.'
+			: "";
 
 	const missingVars = new Set<string>();
 	collectMissingVars(config.instructions, variables, missingVars);
@@ -157,6 +164,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		pacingRules +
 		languageRules +
 		textRules +
+		textStyle +
 		responseStyle +
 		endCallGuidance +
 		missingNote +
@@ -321,6 +329,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		pacingRules,
 		languageRules,
 		textRules,
+		textStyle,
 		responseStyle,
 		missingNote,
 		prohibited,
