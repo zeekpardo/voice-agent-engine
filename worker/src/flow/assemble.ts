@@ -3,7 +3,7 @@ import { inference, llm, voice } from "@livekit/agents";
 import { LLM as AnthropicLLM } from "@livekit/agents-plugin-anthropic";
 import type { JSONSchema7 } from "json-schema";
 import { env } from "../env.js";
-import type { AgentBundle, AgentConfig, ContactStateEntryT, DispatchMetadata } from "../gateway.js";
+import { type AgentBundle, type AgentConfig, type ContactStateEntryT, type DispatchMetadata, reportEvent } from "../gateway.js";
 import { buildTools } from "../tools.js";
 import { createAgentBuilder } from "./agent-builder.js";
 import {
@@ -129,7 +129,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 	// current read-back behavior (confirming critical fields aloud is correct there).
 	const textRules =
 		shared.dispatch.channel === "text"
-			? "\n\n## TEXT CHAT\nThis is a text chat, not a phone call. The user TYPED their answers, so you already have their exact spelling. NEVER spell out, read back, or ask them to confirm phone numbers, emails, or addresses character by character or digit by digit — accept typed values exactly as given. Skip voice-style read-back confirmations; only re-ask when a value is genuinely missing or ambiguous."
+			? "\n\n## TEXT CHAT\nThis is a text chat, not a phone call. The user TYPED their answers, so you already have their EXACT spelling — there is no transcription error to correct. NEVER phonetically spell out or read back a value character by character, digit by digit, or word by word (do NOT turn \"bmoore@gmail.com\" into \"b moore at g mail dot com\"). NEVER echo a phone number, email, or address back for confirmation, and do NOT ask the user to confirm ANY value they just typed — take typed values exactly as given. Skip voice-style read-back confirmations entirely; only re-ask when a value is genuinely missing or truly ambiguous."
 			: "";
 	// SMS/text-native message shaping (Phase 2). Text-channel only (voice untouched);
 	// additive to responseStyle. Mirrors the convo-runner's TEXT_STYLE so the widget/
@@ -175,13 +175,23 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 			"Hang up the phone. Use ONLY when the conversation is fully over: you completed the purpose of the call, the caller confirmed they need nothing else, and you already said goodbye. Never use it early in the call or in reaction to a short, unclear, or ambiguous remark.",
 		parameters: EMPTY_PARAMS,
 		execute: async (_args, { ctx: runCtx }) => {
+			// Every refusal is observable (reason + nodeId + terminality) so a call that
+			// won't end is diagnosable from events instead of guessed at from the loop.
+			const refuse = (reason: string, message: string) => {
+				reportEvent(dispatch.callId, "flow.end_call_refused", {
+					reason,
+					node: state.session?.currentAgent?.id ?? null,
+					currentNodeTerminal: state.currentNodeTerminal,
+					objectivesComplete: state.currentNodeObjectivesComplete ?? false,
+				});
+				return { error: reason, message };
+			};
 			const userTurns = turns.filter((t) => t.role === "user").length;
 			if (userTurns < 2) {
-				return {
-					error: "too_early",
-					message:
-						"The conversation just started — do not hang up. Continue helping the caller and only end the call once its purpose is complete and the caller confirms they need nothing else.",
-				};
+				return refuse(
+					"too_early",
+					"The conversation just started — do not hang up. Continue helping the caller and only end the call once its purpose is complete and the caller confirms they need nothing else.",
+				);
 			}
 			// Mixed-turn guard: models emit end_call IN THE SAME TURN as an exit /
 			// transfer / handoff tool (parallel tool calls), which would kill the
@@ -193,11 +203,10 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 			// within a short window of any completed node swap.
 			const sinceTransition = Date.now() - (state.lastTransitionAt ?? 0);
 			if (state.transferInFlight || state.transitionPending || sinceTransition < 5000) {
-				return {
-					error: "transition_in_progress",
-					message:
-						"The call just moved to a new stage — do not hang up. Continue the conversation at the current stage; only end the call after its purpose is complete and you've said goodbye.",
-				};
+				return refuse(
+					"transition_in_progress",
+					"The call just moved to a new stage — do not hang up. Continue the conversation at the current stage; only end the call after its purpose is complete and you've said goodbye.",
+				);
 			}
 			// Terminal-node gate (the robust fix): the model repeatedly decides the
 			// call is "done" mid-flow and hangs up while stages remain (observed live
@@ -205,13 +214,14 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 			// end_call is only legitimate on a terminal node — one with no forward exit
 			// to a next stage. On a non-terminal stage, refuse and steer the model to
 			// take its exit instead. currentNodeTerminal defaults true, so a
-			// single-agent (no-flow) config is unaffected.
-			if (state.currentNodeTerminal === false) {
-				return {
-					error: "not_terminal_stage",
-					message:
-						"There are more stages in this conversation — do not end the call. Take the appropriate exit to continue; only use end_call from the final stage, after you've said goodbye.",
-				};
+			// single-agent (no-flow) config is unaffected. SECOND terminal signal: once
+			// the current node's objectives are all met/skipped it is terminal-for-end_call
+			// too, so a satisfied node whose transition somehow stalls can still close.
+			if (state.currentNodeTerminal === false && state.currentNodeObjectivesComplete !== true) {
+				return refuse(
+					"not_terminal_stage",
+					"There are more stages in this conversation — do not end the call. Take the appropriate exit to continue; only use end_call from the final stage, after you've said goodbye.",
+				);
 			}
 			await runCtx.waitForPlayout().catch(() => {});
 			await state.hangUp("agent_hangup");
@@ -219,12 +229,25 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		},
 	});
 
-	const buildLlm = (over?: { model?: string; temperature?: number; maxTokens?: number }) =>
+	const buildLlm = (over?: {
+		model?: string;
+		temperature?: number;
+		maxTokens?: number;
+		/** Force strict JSON output (response_format json_object) — used by the
+		 * objective judge so a truncation/format slip can't stall progression. */
+		json?: boolean;
+		/** Reasoning-model effort hint (gpt-5 family etc.). Off by default; the judge
+		 * passes "minimal" on a reasoning model so reasoning tokens don't eat the
+		 * completion budget. Ignored/omitted for non-reasoning models. */
+		reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high";
+	}) =>
 		new inference.LLM({
 			model: inferenceModel(over?.model ?? config.llm.model, "xai", "xai/grok-4-fast"),
 			modelOptions: {
 				temperature: over?.temperature ?? config.llm.temperature,
 				max_completion_tokens: over?.maxTokens ?? config.llm.maxTokens,
+				...(over?.json ? { response_format: { type: "json_object" } } : {}),
+				...(over?.reasoningEffort ? { reasoning_effort: over.reasoningEffort } : {}),
 			},
 		});
 	// The caller-facing respond LLM. On the TEXT channel with ANTHROPIC_API_KEY set
@@ -385,6 +408,12 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		judgeModel: models.judge,
 		recordUsage: (inTok, outTok) => state.usage.record("judge", inTok, outTok),
 		recordNodeResult,
+		// No-progress backstop reset (installed by session-lifecycle) + terminal-for-
+		// end_call flag once a node's objectives are satisfied.
+		onProgress: () => state.onProgress?.(),
+		setObjectivesComplete: (complete: boolean) => {
+			state.currentNodeObjectivesComplete = complete;
+		},
 	});
 	const objectiveUserTurnHook = () => objectivesTracker.onUserTurn();
 

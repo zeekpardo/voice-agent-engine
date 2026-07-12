@@ -161,6 +161,16 @@ export const AgentConfig = z.object({
 			maxCallSeconds: z.number().int().positive().default(900),
 			silenceHangupSeconds: z.number().int().positive().default(30),
 			noAnswerSeconds: z.number().int().positive().default(25),
+			/**
+			 * No-progress / stuck-node backstop (engine-enforced). If a flow stays on a
+			 * single OBJECTIVE node with no objective progress (no objective met/skipped,
+			 * no node change) for this many seconds, the engine force-ends the call. This
+			 * catches a wedged objective judge that never advances the node while the
+			 * model loops the same line — the ordinary silence timeout can't, because it
+			 * resets on every agent turn (a looping agent keeps it alive forever). Only
+			 * armed on objective nodes; conversation / single-agent turns reset it (they
+			 * are governed by silenceHangupSeconds + maxCallSeconds instead). */
+			noProgressSeconds: z.number().int().positive().default(180),
 		})
 		.default({}),
 

@@ -635,12 +635,46 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	// fires on every committed turn on both channels, so text inactivity resets too.
 	session.on(voice.AgentSessionEventTypes.UserInputTranscribed, resetSilence);
 	session.on(voice.AgentSessionEventTypes.ConversationItemAdded, resetSilence);
+
+	// No-progress / stuck-node backstop (spec §4). The silence timer above resets on
+	// EVERY committed turn, so a looping agent (the live wedge: judge never advances
+	// the node, model repeats the same closing line) keeps it alive forever and the
+	// call never ends. This timer resets ONLY on genuine flow progress — a node change
+	// or an objective met/skipped (state.onProgress, fired by the flow modules) — so a
+	// stuck OBJECTIVE node force-ends after noProgressSeconds. On non-objective nodes
+	// (conversation / single-agent) every caller turn counts as progress, so a
+	// legitimate open conversation is never cut here (silence + maxCall govern it).
+	const noProgressMs = config.timeouts.noProgressSeconds * 1000;
+	let noProgressTimer: NodeJS.Timeout | undefined;
+	const resetNoProgress = () => {
+		if (noProgressTimer) clearTimeout(noProgressTimer);
+		noProgressTimer = setTimeout(() => {
+			reportEvent(dispatch.callId, "flow.no_progress_timeout", {
+				node: session.currentAgent?.id ?? null,
+				seconds: config.timeouts.noProgressSeconds,
+			});
+			void state.hangUp("no_progress");
+		}, noProgressMs);
+	};
+	state.onProgress = resetNoProgress;
+	session.on(voice.AgentSessionEventTypes.ConversationItemAdded, (ev) => {
+		// A caller turn on a NON-objective node is progress (open conversation); on an
+		// objective node it is NOT — only node changes / objective completions reset the
+		// backstop, so a looping objective node is caught.
+		if (!("role" in ev.item)) return;
+		const isUser = ev.item.role === "user";
+		if (isUser && !state.currentNodeHasObjectives) resetNoProgress();
+	});
+
 	session.on(voice.AgentSessionEventTypes.Close, () => {
 		clearTimeout(maxCallTimer);
 		if (silenceTimer) clearTimeout(silenceTimer);
+		if (noProgressTimer) clearTimeout(noProgressTimer);
 		// A conversation node's soft wrap-up timer must not fire (generateReply)
 		// after the session is torn down.
 		if (state.conversationTimer) clearTimeout(state.conversationTimer);
+		// The explicit voice park-end timer, likewise.
+		if (state.parkEndTimer) clearTimeout(state.parkEndTimer);
 	});
 
 	// 7. Go live. The channel owns how (voice: start + SIP answer wait; text:
@@ -661,6 +695,7 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 
 	startedAt = Date.now();
 	resetSilence();
+	resetNoProgress();
 	if (!deps.isInbound) {
 		reportEvent(dispatch.callId, "call.started", { room: ctx.room.name ?? null });
 	}

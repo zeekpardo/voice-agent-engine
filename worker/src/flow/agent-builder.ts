@@ -288,15 +288,19 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 		}
 		if (ctx.endCallEnabled) nodeTools.end_call = ctx.endCallTool;
 
-		// Terminal node = the model may legitimately end_call here. A node is terminal
-		// only when NONE of its regular exits routes onward to a next node — i.e. every
-		// exit is a call-ending exit (no target) or it has no exits at all. Scenarios
-		// are EXCLUDED: they are cross-cutting detect-and-jump exits present on every
-		// node, not part of this node's forward path, so a node with only scenario
-		// exits is still terminal. end_call refuses on a non-terminal node (a stage
-		// with a forward "Next" exit), so the model can't prematurely hang up mid-flow
-		// — it must take the exit; only the final stage closes with end_call.
-		const isTerminalNode = !node.exits.some((e) => !!e.target);
+		// Terminal node = the model may legitimately end_call here. Terminality is a
+		// property of the node's FORWARD/PRIMARY path only — its primary exit (exits[0]).
+		// A node is terminal when its primary exit ends the call (no target) or it has no
+		// primary exit at all. EXCLUDED from the check: secondary exits (exits[1+], e.g.
+		// "Wrong number" — model-callable side branches, not the forward path) and global
+		// scenario exits (cross-cutting detect-and-jump, present on every node). The old
+		// check looked at EVERY exit's target, so ANY node with a secondary targeted exit
+		// was wrongly non-terminal and end_call could NEVER fire there (the live
+		// never-ends regression). A conversation node whose wrapUp closes via end_call is
+		// terminal by definition (it has no forward exit — it ends the call itself).
+		const primaryForwardExit = node.exits[0];
+		const wrapUpEndsCall = isConversation && conversation!.wrapUp.mode === "end_call";
+		const isTerminalNode = wrapUpEndsCall || !primaryForwardExit || !primaryForwardExit.target;
 
 		const exitNames = toolExits.map((e) => `exit_${sanitize(e.name)}`).join(", ");
 		return voice.Agent.create({
@@ -361,6 +365,21 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				// end_call tool knows whether hanging up here is legitimate.
 				ctx.state.transitionPending = false;
 				ctx.state.currentNodeTerminal = isTerminalNode;
+				// A fresh node's objectives are not yet complete — reset the
+				// terminal-for-end_call override the previous node may have set.
+				ctx.state.currentNodeObjectivesComplete = false;
+				// No-progress backstop governance: on an objective node the backstop only
+				// resets on real flow progress (this entry, or an objective met/skipped),
+				// so a looping agent is caught; on non-objective nodes every caller turn
+				// resets it (session-lifecycle), so an open conversation is never cut.
+				ctx.state.currentNodeHasObjectives = hasObjectives;
+				// Entering a node IS flow progress — reset the no-progress timer.
+				ctx.state.onProgress?.();
+				// Leaving any prior parked state clears its explicit end timer.
+				if (ctx.state.parkEndTimer) {
+					clearTimeout(ctx.state.parkEndTimer);
+					ctx.state.parkEndTimer = undefined;
+				}
 				// At most one conversation wrap-up timer is ever live: clear any timer
 				// armed by a previous node before (re)arming below.
 				if (ctx.state.conversationTimer) {
@@ -491,6 +510,11 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 	/** Drive a resolved scenario target out of the parked state (detached — not a
 	 * tool context). Mirrors the objectives judge's transition switch. */
 	const routeOutOfPark = (resolved: ResolvedTarget, session: voice.AgentSession): void => {
+		// Leaving park: cancel the explicit voice park-end timer.
+		if (ctx.state.parkEndTimer) {
+			clearTimeout(ctx.state.parkEndTimer);
+			ctx.state.parkEndTimer = undefined;
+		}
 		if (resolved.kind === "agent") {
 			const nextCtx = session.currentAgent.chatCtx.copy({ excludeInstructions: true });
 			session.updateAgent(buildFlowAgent(resolved.id, nextCtx));
@@ -540,12 +564,35 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				ctx.state.parked = true;
 				// NOT a terminal node: end_call must refuse here — park never hangs up.
 				ctx.state.currentNodeTerminal = false;
+				ctx.state.currentNodeObjectivesComplete = false;
 				ctx.state.transitionPending = false;
+				// Not an objective node: caller turns reset the no-progress backstop so a
+				// parked contact isn't force-ended by it (park end is governed below / by
+				// maxCall). Entering park is itself progress.
+				ctx.state.currentNodeHasObjectives = false;
+				ctx.state.onProgress?.();
 				// Disarm the previous node's objective judge and any conversation timer.
 				getObjectivesTracker().arm({ id: "park", objectives: [], primaryExit: { name: "end" } });
 				if (ctx.state.conversationTimer) {
 					clearTimeout(ctx.state.conversationTimer);
 					ctx.state.conversationTimer = undefined;
+				}
+				// VOICE park-end backstop: the parked agent never speaks, so the ordinary
+				// silence timeout (reset on every committed turn) can be held open forever
+				// by a caller who keeps talking to a silent line. Arm an EXPLICIT end timer
+				// that is NOT reset by turns so a parked voice call reliably closes. Text
+				// parks indefinitely by design (governed by inactivity + maxCall).
+				if (ctx.state.parkEndTimer) clearTimeout(ctx.state.parkEndTimer);
+				ctx.state.parkEndTimer = undefined;
+				if (ctx.dispatch.channel !== "text") {
+					const parkEndMs = ctx.config.timeouts.silenceHangupSeconds * 1000;
+					ctx.state.parkEndTimer = setTimeout(() => {
+						ctx.state.parkEndTimer = undefined;
+						if (ctx.state.completed) return;
+						if (ctx.state.session?.currentAgent.id !== "park") return; // routed out
+						reportEvent(dispatch.callId, "flow.park_timeout", { seconds: ctx.config.timeouts.silenceHangupSeconds });
+						void ctx.hangUp("park_timeout");
+					}, parkEndMs);
 				}
 			},
 		});

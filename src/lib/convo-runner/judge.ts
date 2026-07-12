@@ -144,11 +144,18 @@ export async function judgeObjectives(ctx: TurnContext, node: FlowNode): Promise
 	];
 	try {
 		const complete = useOpenAI ? openaiComplete : chatComplete;
+		// Count-scaled completion budget so a many-objective batch always returns a
+		// COMPLETE JSON object; the flat 400 truncated (worse on a reasoning model whose
+		// reasoning tokens eat the budget). A reasoning judge (gpt-5 default) also gets a
+		// "minimal" effort hint so it spends the budget on the JSON, not hidden reasoning.
+		const judgeMaxTokens = Math.max(800, unmet.length * 150 + 300);
+		const reasoningJudge = useOpenAI && /gpt-5|o1|o3|o4|reasoning/i.test(judgeModel);
 		const res = await complete({
 			model: judgeModel,
 			temperature: node.judge?.temperature ?? 0,
-			maxTokens: 400,
+			maxTokens: judgeMaxTokens,
 			json: true,
+			...(reasoningJudge ? { reasoningEffort: "minimal" as const } : {}),
 			messages: judgeMessages,
 		});
 		recordUsage(ctx.state, "judge", res.usage.promptTokens, res.usage.completionTokens);

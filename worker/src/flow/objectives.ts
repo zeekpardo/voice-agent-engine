@@ -103,6 +103,8 @@ export interface ObjectivesDeps {
 		model?: string;
 		temperature?: number;
 		maxTokens?: number;
+		json?: boolean;
+		reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high";
 	}) => {
 		/** Resolved inference model id (for ai.turn logging). */
 		model: string;
@@ -152,6 +154,16 @@ export interface ObjectivesDeps {
 	 * interpolation variables (CloseBot "Nodes" Tier 1) once its objectives complete.
 	 * result = captured answer(s); succeeded = every required objective met (no skip). */
 	recordNodeResult: (nodeId: string, fields: { result?: string; succeeded?: boolean }) => void;
+	/** Signal genuine flow progress (an objective was met or skipped) so the engine's
+	 * no-progress backstop resets. A wedged judge that never scores makes NO progress,
+	 * so the backstop eventually force-ends the call — this keeps it from firing while
+	 * objectives are actually advancing. */
+	onProgress?: () => void;
+	/** Publish that the current node's required objectives are all met/skipped, so the
+	 * shared end_call tool treats the node as terminal-for-end_call (a model-driven
+	 * hangup is legitimate once the data is captured, even mid-flow). Reset to false on
+	 * every node entry (buildFlowAgent onEnter). */
+	setObjectivesComplete?: (complete: boolean) => void;
 }
 
 /** Node-shaped input to `arm` — only the fields the tracker needs. */
@@ -178,6 +190,26 @@ export interface ObjectivesTracker {
 const OBJECTIVE_RATING_THRESHOLD = 90;
 const objectiveThreshold = (o: FlowObjective): number =>
 	Math.min(100, Math.max(10, o.sensitivity ?? OBJECTIVE_RATING_THRESHOLD));
+
+/** Default judge model. A NON-reasoning, cheap, strict-JSON model (CloseBot-style):
+ * it returns a compact `{"checks":[…]}` object reliably and, unlike a reasoning
+ * model (gpt-5-mini), spends none of its completion budget on hidden reasoning
+ * tokens — the root cause of the live `unparseable_or_schema_invalid_json` wedge
+ * (the 400-token cap was consumed by reasoning before any JSON was emitted). Already
+ * the proven cheap model on this Inference path (router + parked-scenario passes). */
+const DEFAULT_JUDGE_MODEL = "openai/gpt-4o-mini";
+
+/** Judge completion-token budget, scaled to the number of objectives scored in one
+ * batch so a many-objective node (the live wedge had 7) always gets a COMPLETE JSON
+ * object back. The judge runs off the speech critical path, so a generous cap costs
+ * no latency. Retries bump it further (see runObjectiveJudge). */
+const judgeMaxTokens = (objectiveCount: number): number => Math.max(800, objectiveCount * 150 + 300);
+
+/** Give up on an objective after this many caller turns / consecutive judge failures
+ * when the objective sets no explicit maxAttempts. Prevents an infinite loop when the
+ * judge can't score (every failure now counts) or a caller keeps dodging — the
+ * objective is marked skipped so the node can still advance. */
+const DEFAULT_MAX_ATTEMPTS = 3;
 const OBJECTIVE_JUDGE_SYSTEM =
 	'You evaluate whether data-collection objectives for a phone call have been satisfied by the conversation so far. Respond with ONLY a JSON object — no prose, no code fences — of the form {"checks":[{"key":"<objective key>","rating":<0-100>,"answer":"<extracted value or empty string>"}]}. Objectives come in two groups. For each objective under "To collect" include exactly one check. For each objective under "Already answered" include a check ONLY if the caller has since stated a DIFFERENT value than its recorded answer — return the new value with your confidence; do not re-report an unchanged answer. rating is your confidence that the CALLER explicitly provided the information (100 = clearly provided, 0 = not provided at all). Extract answer from what the caller actually said. NEVER invent or assume a value the caller did not state; if the information was not provided, rating must be low and answer empty. When an objective lists allowed values, answer must be exactly one of them, chosen from what the caller said. Some objectives are CONDITIONAL ("if X, …"): when the conversation clearly shows the condition does NOT apply, the objective is satisfied — rate it 100 with answer "N/A".';
 
@@ -229,14 +261,28 @@ function waitForAgentIdle(session: voice.AgentSession, timeoutMs: number): Promi
 }
 
 export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker {
-	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, buildParkedAgent, startTransfer, startHandoff, hangUp, isCompleted, setTransitionPending, judgeModel, recordUsage, recordNodeResult } =
+	const { dispatch, turns, contactState, buildLlm, fieldWriteDef, resolveTarget, buildFlowAgent, buildParkedAgent, startTransfer, startHandoff, hangUp, isCompleted, setTransitionPending, judgeModel, recordUsage, recordNodeResult, onProgress, setObjectivesComplete } =
 		deps;
 	// `session` is a LAZY getter on deps (the AgentSession is built after this
 	// factory wires up) — it MUST be read fresh via deps.session at call time.
 	// Destructuring it here would capture `undefined` (the value during wiring)
 	// and every transition would crash on `session.agentState`.
 	const getSession = () => deps.session;
-	const defaultJudgeLlm = buildLlm({ model: judgeModel ?? "openai/gpt-5-mini", temperature: 0, maxTokens: 400 });
+	// Resolved judge model: a per-node `node.judge.model` override still wins (applied
+	// in runObjectiveJudge); this is the DEFAULT for nodes without one. Non-reasoning +
+	// strict JSON (see DEFAULT_JUDGE_MODEL) so batched scoring returns complete JSON.
+	const resolvedJudgeModel = judgeModel ?? DEFAULT_JUDGE_MODEL;
+	// A reasoning model (gpt-5 family) still gets a "minimal" effort hint so reasoning
+	// tokens don't eat the completion budget; the non-reasoning default ignores it.
+	const isReasoningJudge = /gpt-5|o1|o3|o4|reasoning/i.test(resolvedJudgeModel);
+	const buildJudgeLlm = (model: string, maxTokens: number, reasoning: boolean, temperature: number) =>
+		buildLlm({
+			model,
+			temperature,
+			maxTokens,
+			json: true,
+			...(reasoning ? { reasoningEffort: "minimal" as const } : {}),
+		});
 
 	let activeObjectives: ObjectiveRuntime | null = null;
 
@@ -344,6 +390,48 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 		}
 	};
 
+	/**
+	 * Burn one attempt on the FIRST live (unmet, non-skipped, non-aggregate)
+	 * objective and skip it once its limit is reached. Called on BOTH a scored pass
+	 * that left the focus unmet AND a judge FAILURE (unparseable/schema-invalid) —
+	 * the live wedge looped forever because failures never counted, so the node never
+	 * advanced. The limit is the objective's own maxAttempts or DEFAULT_MAX_ATTEMPTS
+	 * when unset (previously an objective with no maxAttempts could loop forever).
+	 * Skipping stops the objective gating the exit, so the node can advance.
+	 */
+	const burnAttempt = (rt: ObjectiveRuntime, reason: "unmet" | "judge_failure"): void => {
+		const focus = rt.objectives.find((o) => {
+			if (o.aggregateOf?.length) return false;
+			const p = rt.state.get(o.key);
+			return p && !p.met && !p.skipped;
+		});
+		if (!focus) return;
+		const progress = rt.state.get(focus.key)!;
+		progress.attempts += 1;
+		const limit = focus.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+		if (progress.attempts >= limit) {
+			progress.skipped = true;
+			reportEvent(dispatch.callId, "flow.objective_skipped", {
+				node: rt.nodeId,
+				key: focus.key,
+				attempts: progress.attempts,
+				reason,
+			});
+			// A repeatedly-failing judge that forces a skip is a distinct, louder signal
+			// than a caller simply not answering — surface it so the wedge is diagnosable.
+			if (reason === "judge_failure") {
+				reportEvent(dispatch.callId, "flow.judge_giveup", {
+					node: rt.nodeId,
+					key: focus.key,
+					attempts: progress.attempts,
+				});
+			}
+			// Skipping is real flow progress (the node can now advance) — reset the
+			// no-progress backstop so it doesn't also fire.
+			onProgress?.();
+		}
+	};
+
 	const runObjectiveJudge = async (rt: ObjectiveRuntime): Promise<void> => {
 		// Aggregate objectives have no own judge question — they complete from their
 		// parts (completeAggregates), so they are excluded from both lists.
@@ -394,14 +482,24 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			content: `${sections.join("\n\n")}\n\nConversation transcript:\n${transcript}`,
 		});
 
-		const judgeLlm = rt.judge ? buildLlm({ temperature: 0, maxTokens: 400, ...rt.judge }) : defaultJudgeLlm;
+		// Per-node judge override wins; else the resolved default. A reasoning override
+		// (gpt-5/o-series) gets the "minimal" effort hint too.
+		const model = rt.judge?.model ?? resolvedJudgeModel;
+		const reasoning = rt.judge?.model ? /gpt-5|o1|o3|o4|reasoning/i.test(rt.judge.model) : isReasoningJudge;
+		const temperature = rt.judge?.temperature ?? 0;
+		// Count-scaled completion budget so a many-objective batch always returns a
+		// COMPLETE JSON object (the live wedge truncated at a flat 400 cap).
+		const baseTokens = judgeMaxTokens(unmet.length + correctable.length);
 		// Parse + schema-validate with one corrective retry (audit Tier 1 #6). Both
 		// attempts stay OFF the speech path (this whole pass is async/background). The
-		// retry appends a corrective nudge to the SAME context so the first attempt's
-		// prompt is unchanged.
+		// retry appends a corrective nudge to the SAME context AND doubles the token
+		// budget (a truncated first attempt is the common failure), so the retry isn't
+		// just re-running the same starved request.
 		let parsed: JudgeOutput | null = null;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			if (attempt > 0) evalCtx.addMessage({ role: "user", content: JUDGE_CORRECTIVE });
+			const maxTokens = baseTokens * (attempt + 1);
+			const judgeLlm = buildJudgeLlm(model, maxTokens, reasoning, temperature);
 			const res = await judgeLlm.chat({ chatCtx: evalCtx }).collect();
 			// Per-class metering (Phase 4): the judge is a standalone call the session's
 			// MetricsCollected never sees — read usage straight off the collected response.
@@ -443,6 +541,10 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 				node: rt.nodeId,
 				reason: "unparseable_or_schema_invalid_json",
 			});
+			// Circuit breaker: a judge failure now COUNTS toward the focus objective's
+			// attempts, so a persistently-broken judge can't wedge the node forever —
+			// after the limit the objective is skipped and the node advances.
+			burnAttempt(rt, "judge_failure");
 			return;
 		}
 
@@ -506,30 +608,17 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			if (progress.answer && progress.answer.toUpperCase() !== "N/A") {
 				writeObjectiveField(objective, progress.answer, progress);
 			}
+			// A newly-met objective is genuine flow progress — reset the no-progress backstop.
+			onProgress?.();
 		}
 
 		// Max attempts (CloseBot semantics): objectives are pursued roughly in
 		// order, so each caller turn that leaves the FIRST live objective unmet
-		// burns one attempt on it. Exhausted → it stops gating the exit
-		// (skipped, stays unmet) so a dodging caller can't stall the flow
-		// forever.
-		const focus = rt.objectives.find((o) => {
-			if (o.aggregateOf?.length) return false;
-			const p = rt.state.get(o.key);
-			return p && !p.met && !p.skipped;
-		});
-		if (focus?.maxAttempts) {
-			const progress = rt.state.get(focus.key)!;
-			progress.attempts += 1;
-			if (progress.attempts >= focus.maxAttempts) {
-				progress.skipped = true;
-				reportEvent(dispatch.callId, "flow.objective_skipped", {
-					node: rt.nodeId,
-					key: focus.key,
-					attempts: progress.attempts,
-				});
-			}
-		}
+		// burns one attempt on it. Exhausted → it stops gating the exit (skipped,
+		// stays unmet) so a dodging caller — or a repeatedly-failing judge — can't
+		// stall the flow forever. Now applied with a DEFAULT limit when the objective
+		// sets none (previously such objectives looped unbounded).
+		burnAttempt(rt, "unmet");
 
 		// Roll any now-satisfiable aggregates up from their parts.
 		completeAggregates(rt);
@@ -554,6 +643,11 @@ export function createObjectivesTracker(deps: ObjectivesDeps): ObjectivesTracker
 			writeObjectiveField(o, p.answer, p);
 		}
 		rt.transitioning = true;
+		// The node's data goals are satisfied: publish it as terminal-for-end_call so a
+		// model-driven hangup is legitimate from here (a safety net if the async
+		// transition below ever stalls). Reset on the next node's entry.
+		setObjectivesComplete?.(true);
+		onProgress?.();
 		// Publish this node's outcome as {{node_<id>_result|attempts|succeeded}}
 		// (CloseBot "Nodes" Tier 1) BEFORE the async transition below, so the next
 		// node's prompt build (which happens after the idle-wait) already resolves it.
