@@ -1,6 +1,8 @@
 import type { JobContext } from "@livekit/agents";
 import { inference, llm, voice } from "@livekit/agents";
+import { LLM as AnthropicLLM } from "@livekit/agents-plugin-anthropic";
 import type { JSONSchema7 } from "json-schema";
+import { env } from "../env.js";
 import type { AgentBundle, AgentConfig, ContactStateEntryT, DispatchMetadata } from "../gateway.js";
 import { buildTools } from "../tools.js";
 import { createAgentBuilder } from "./agent-builder.js";
@@ -9,6 +11,7 @@ import {
 	type FlowRuntimeState,
 	type ResolvedModels,
 	type Turn,
+	anthropicRespondModel,
 	buildTts,
 	collectMissingVars,
 	findToolDef,
@@ -216,7 +219,22 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 				max_completion_tokens: over?.maxTokens ?? config.llm.maxTokens,
 			},
 		});
-	const defaultLlm = buildLlm({ model: models.respond });
+	// The caller-facing respond LLM. On the TEXT channel with ANTHROPIC_API_KEY set
+	// and no explicit config.models.respond override, run the reply on Claude via
+	// the LiveKit Anthropic plugin (so widget/test text matches omnichannel Claude
+	// quality); otherwise the current Inference path (grok / configured model).
+	// VOICE never reaches this branch — the gate returns null off the text channel,
+	// so buildVoiceChannel's flow is byte-for-byte unchanged. Temperature is NOT
+	// passed (current Claude models reject non-default sampling), mirroring the
+	// gateway's anthropicComplete. Judge/summary/router keep using buildLlm above.
+	const claudeRespond = anthropicRespondModel(shared.dispatch.channel, config);
+	const defaultLlm: llm.LLM = claudeRespond
+		? new AnthropicLLM({
+				model: claudeRespond,
+				apiKey: env.ANTHROPIC_API_KEY,
+				...(config.llm.maxTokens ? { maxTokens: config.llm.maxTokens } : {}),
+			})
+		: buildLlm({ model: models.respond });
 
 	if (!config.flow) {
 		// Single agent (no flow). On a handoff the carried chatCtx keeps the

@@ -4,7 +4,7 @@ import {
 	TelephonyBackgroundVoiceCancellation,
 } from "@livekit/noise-cancellation-node";
 import { reportAiTurn } from "./ai-log.js";
-import { type FlowRuntimeState, type Turn, buildTts, inferenceModel } from "./flow/context.js";
+import { type FlowRuntimeState, type Turn, anthropicRespondModel, buildTts, inferenceModel } from "./flow/context.js";
 import { type AgentConfig, type DispatchMetadata, reportCompletion, reportEvent } from "./gateway.js";
 import { createLanguageAligner } from "./language.js";
 
@@ -439,11 +439,13 @@ export async function startSession(deps: SessionLifecycleDeps): Promise<void> {
 	// arrive before the reply commits as a ConversationItemAdded, so metrics are
 	// queued here and consumed by the item handler.
 	const respondMetricsQueue: { promptTokens: number; completionTokens: number }[] = [];
-	const respondModel = inferenceModel(
-		config.models?.respond ?? config.llm.model,
-		"xai",
-		"xai/grok-4-fast",
-	);
+	// AI-logs badge for the respond role. When the TEXT channel runs the reply on
+	// Claude (same gate as flow/assemble's defaultLlm), label the ai.turn with the
+	// Claude model so providerFromModel maps it to Anthropic; otherwise the xAI /
+	// configured Inference model. Voice is unaffected (gate returns null).
+	const respondModel =
+		anthropicRespondModel(dispatch.channel, config) ??
+		inferenceModel(config.models?.respond ?? config.llm.model, "xai", "xai/grok-4-fast");
 
 	// 4. Collect transcript turns + usage meters as the session runs. Channel-
 	// agnostic: ConversationItemAdded fires whether the turn arrived by STT or a
