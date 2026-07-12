@@ -33,6 +33,31 @@ export function anthropicRespondModel(
 }
 
 /**
+ * VOICE `respond` default (owner-chosen "balanced" tier). The caller-facing
+ * responder defaults to gpt-4o so objective questions come out varied and
+ * human-sounding — grok-4-1-fast rendered every objective the same template
+ * ("Thanks. Could you tell me your <X>?"). openai/* is already brokered on this
+ * LiveKit Inference path (judge/router/memory all default to openai/gpt-4o-mini),
+ * and "openai/gpt-4o" is a listed model in the Inference catalog (OpenAIModels).
+ * This is a CODE default only — no new config field — so existing configs with no
+ * models.respond pick it up automatically. An explicit config.models.respond and a
+ * per-node node.llm both still WIN, and xAI grok stays the ultimate graceful
+ * fallback (inferenceModel's fallback arg) if the id ever resolves empty.
+ */
+export const VOICE_RESPOND_DEFAULT_MODEL = "openai/gpt-4o";
+
+/**
+ * The respond model id actually used on the Inference (non-Claude) path — shared by
+ * the LLM builder (flow/assemble) and the ai.turn label (session-lifecycle) so the
+ * two always agree. config.models.respond wins; else VOICE defaults to gpt-4o
+ * (balanced tier) while TEXT keeps config.llm.model (legacy behavior, usually grok).
+ */
+export function inferenceRespondModelId(channel: DispatchMetadata["channel"], config: AgentConfig): string {
+	const base = config.models?.respond ?? (channel !== "text" ? VOICE_RESPOND_DEFAULT_MODEL : config.llm.model);
+	return inferenceModel(base, "xai", "xai/grok-4-fast");
+}
+
+/**
  * Shared runtime context for the flow subsystem (spec §7). main.ts's entry
  * closure used to capture all of this state directly; the flow modules
  * (router, transfer, agent-builder) and session-lifecycle now take this
@@ -424,6 +449,11 @@ export interface FlowRuntimeContext {
 	// prompt fragments assembled once, inherited by every node
 	globalInstructions: string;
 	pacingRules: string;
+	/** Default lead-and-vary conversational guidance (`## CONVERSATIONAL STYLE`),
+	 * applied to EVERY generation (voice + text) independent of the optional
+	 * per-agent responseStyle, so replies acknowledge the prior answer and vary
+	 * their phrasing instead of templating each objective question. */
+	conversationStyle: string;
 	/** Voice-only "reply in the caller's current language" rule (empty on text). */
 	languageRules: string;
 	/** Text-only "don't read back typed values character by character" rule (empty

@@ -15,6 +15,7 @@ import {
 	buildTts,
 	collectMissingVars,
 	findToolDef,
+	VOICE_RESPOND_DEFAULT_MODEL,
 	inferenceModel,
 	interpolate,
 	interpolateSpoken,
@@ -116,6 +117,14 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		: "";
 	const pacingRules =
 		"\n\n## PACING\nThis is a live phone call: ask at most ONE question per reply, then stop and wait for the caller to answer. Never ask a follow-up question in the same reply, never assume or invent an answer the caller has not actually said, and never save a value with a tool unless the caller explicitly provided it. After a tool returns, if you still need information from the caller, ask your single next question and wait.";
+	// Default lead-and-vary conversational behavior, applied to EVERY generation
+	// (voice + text) — independent of the optional per-agent responseStyle. Without
+	// it a minimal responder templates every objective turn identically ("Thanks.
+	// Could you tell me your <X>?"); this makes it acknowledge the last answer and
+	// vary its phrasing like a real person leading the call. Model-agnostic; keeps
+	// the hard PACING rules (one question, don't invent, don't announce stages) intact.
+	const conversationStyle =
+		'\n\n## CONVERSATIONAL STYLE\nSound like a warm, real person leading this call — not a form that reads off fields. Before you ask the next thing, briefly and SPECIFICALLY acknowledge what the caller just said (react to their actual answer), then lead naturally into your next question. Do NOT template your replies: never open consecutive replies with the same word (especially not "Thanks." every turn), and never reuse a fixed scaffold like "Could you tell me your ___". Vary your acknowledgements and sentence openers each turn, and weave the next question in conversationally instead of reciting the field name (e.g. "Perfect — and what city and zip is that in?", "Got it. Do you happen to know the square footage?"). Still ask only ONE thing per reply, never invent or assume an answer the caller did not give, and never announce stage changes.';
 	// Mid-call language alignment, LLM leg (voice only — text portals render the
 	// configured language): unconditional, no config needed. The STT leg lives in
 	// session-lifecycle's language aligner.
@@ -162,6 +171,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 	const instructions =
 		globalInstructions +
 		pacingRules +
+		conversationStyle +
 		languageRules +
 		textRules +
 		textStyle +
@@ -259,13 +269,18 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 	// passed (current Claude models reject non-default sampling), mirroring the
 	// gateway's anthropicComplete. Judge/summary/router keep using buildLlm above.
 	const claudeRespond = anthropicRespondModel(shared.dispatch.channel, config);
+	// VOICE respond default (code-level, no config field): fall back to gpt-4o when
+	// the agent sets no models.respond override. TEXT (non-Claude) keeps its legacy
+	// default (config.llm.model via buildLlm) — passing undefined leaves it unchanged.
+	const respondModelOverride =
+		models.respond ?? (shared.dispatch.channel !== "text" ? VOICE_RESPOND_DEFAULT_MODEL : undefined);
 	const defaultLlm: llm.LLM = claudeRespond
 		? new AnthropicLLM({
 				model: claudeRespond,
 				apiKey: env.ANTHROPIC_API_KEY,
 				...(config.llm.maxTokens ? { maxTokens: config.llm.maxTokens } : {}),
 			})
-		: buildLlm({ model: models.respond });
+		: buildLlm({ model: respondModelOverride });
 
 	if (!config.flow) {
 		// Single agent (no flow). On a handoff the carried chatCtx keeps the
@@ -350,6 +365,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		models,
 		globalInstructions,
 		pacingRules,
+		conversationStyle,
 		languageRules,
 		textRules,
 		textStyle,

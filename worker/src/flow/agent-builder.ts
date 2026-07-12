@@ -315,7 +315,7 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				`\n\n## YOUR CURRENT STAGE\n${ctx.interpolate(node.instructions)}` +
 				conversationReasonBlock +
 				(hasObjectives
-					? `\n\n## OBJECTIVES\nIn this stage you must learn the following from the caller, naturally and ONE question at a time:\n${objectives
+					? `\n\n## OBJECTIVES\nIn this stage you must learn the following from the caller. Draw each one out conversationally, ONE question at a time — acknowledge the caller's previous answer, then lead into the next in your own varied words. These are the FACTS to obtain, NOT scripts to read: never recite a field name or reuse the same question scaffold turn after turn.\n${objectives
 							.map(
 								(o) =>
 									`- ${o.description}${
@@ -340,6 +340,7 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 				"\n\n## CONTINUITY\nThis is ONE continuous conversation. Never greet the caller again or re-introduce yourself after the call has started. Never repeat a question that was already answered — check the conversation before asking. Don't recap earlier answers unless you're confirming a correction. Vary your acknowledgements instead of repeating the same phrase." +
 				"\n\n## IF SOMETHING FAILS\nIf a tool or action fails and you were not given specific wording to say, acknowledge it once briefly, do NOT repeat your last question, and offer to follow up (for example, note that someone will get back to them). Never pretend an action succeeded when it did not." +
 				ctx.pacingRules +
+				ctx.conversationStyle +
 				ctx.languageRules +
 				ctx.textRules +
 				ctx.responseStyle +
