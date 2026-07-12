@@ -39,6 +39,16 @@ import { createLanguageAligner } from "./language.js";
  * are published back on it. Mirrors `@livekit/agents` constants TOPIC_CHAT. */
 const TOPIC_CHAT = "lk.chat";
 
+/** Maps the audio-config enum literals to SDK BuiltinAudioClip members. Shared by
+ * the thinking sound and the optional ambient bed; unknown keys fall back to a
+ * safe default at the call site. */
+const CLIP_BY_KEY = {
+	keyboard_typing: voice.BuiltinAudioClip.KEYBOARD_TYPING,
+	keyboard_typing2: voice.BuiltinAudioClip.KEYBOARD_TYPING2,
+	office_ambience: voice.BuiltinAudioClip.OFFICE_AMBIENCE,
+	hold_music: voice.BuiltinAudioClip.HOLD_MUSIC,
+} as const;
+
 /** Text sessions have no dead-air cost, so the inactivity timeout is far longer
  * than a voice call's silence-hangup. Used unless the configured silence value
  * is even longer (an operator who set a long voice silence keeps it on text). */
@@ -260,6 +270,7 @@ function buildVoiceChannel(
 	// slow LLM/tool turn isn't dead air. Voice channel only; created at start and
 	// released in dispose(). Default ON, kill switch via config.audio.thinkingSound.
 	const thinkingSoundEnabled = config.audio?.thinkingSound !== false;
+	const ambientEnabled = config.audio?.ambientSound?.enabled === true;
 	let bgAudio: voice.BackgroundAudioPlayer | null = null;
 
 	const noAnswerMs = (config.timeouts.noAnswerSeconds ?? 25) * 1000;
@@ -278,22 +289,35 @@ function buildVoiceChannel(
 					? TelephonyBackgroundVoiceCancellation()
 					: BackgroundVoiceCancellation();
 			console.log(
-				`[session] voice options: turnDetection=${config.turnDetection.mode} interruptionMinWords=${config.turnDetection.interruptionMinWords} falseInterruptionTimeout=2000ms noiseCancellation=${ncEnabled ? (telephony ? "telephony" : "background") : "off"} thinkingSound=${thinkingSoundEnabled ? "on" : "off"}`,
+				`[session] voice options: turnDetection=${config.turnDetection.mode} interruptionMinWords=${config.turnDetection.interruptionMinWords} falseInterruptionTimeout=2000ms noiseCancellation=${ncEnabled ? (telephony ? "telephony" : "background") : "off"} thinkingSound=${thinkingSoundEnabled ? (config.audio?.thinkingSoundClip ?? "keyboard_typing2") : "off"} ambient=${ambientEnabled ? config.audio?.ambientSound?.clip : "off"}`,
 			);
 			await session.start({
 				agent,
 				room: ctx.room,
 				...(noiseCancellation ? { inputOptions: { noiseCancellation } } : {}),
 			});
-			if (thinkingSoundEnabled) {
+			if (thinkingSoundEnabled || ambientEnabled) {
+				const clip = (key: string | undefined, fallback: voice.BuiltinAudioClip) =>
+					(key && CLIP_BY_KEY[key as keyof typeof CLIP_BY_KEY]) || fallback;
+				const bgOptions: voice.BackgroundAudioPlayerOptions = {};
+				if (thinkingSoundEnabled) {
+					bgOptions.thinkingSound = {
+						source: clip(config.audio?.thinkingSoundClip, voice.BuiltinAudioClip.KEYBOARD_TYPING2),
+						volume: config.audio?.thinkingSoundVolume ?? 0.4,
+					};
+				}
+				if (ambientEnabled) {
+					bgOptions.ambientSound = {
+						source: clip(config.audio?.ambientSound?.clip, voice.BuiltinAudioClip.OFFICE_AMBIENCE),
+						volume: config.audio?.ambientSound?.volume ?? 0.3,
+					};
+				}
 				try {
-					bgAudio = new voice.BackgroundAudioPlayer({
-						thinkingSound: { source: voice.BuiltinAudioClip.KEYBOARD_TYPING2, volume: 0.4 },
-					});
+					bgAudio = new voice.BackgroundAudioPlayer(bgOptions);
 					await bgAudio.start({ room: ctx.room, agentSession: session });
 				} catch (err) {
 					// Non-fatal: a missing audio track must never fail the call.
-					console.error("[session] thinking-sound start failed", err);
+					console.error("[session] background-audio start failed", err);
 					bgAudio = null;
 				}
 			}
