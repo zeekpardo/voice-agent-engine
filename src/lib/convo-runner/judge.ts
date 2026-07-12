@@ -1,7 +1,8 @@
 import type { FlowNode, FlowObjective } from "@voice-engine/shared/agent-config";
 import { z } from "zod";
 import { env } from "../../env.js";
-import { chatComplete, openaiComplete } from "../llm.js";
+import { type ChatMessage, chatComplete, openaiComplete } from "../llm.js";
+import { aiTurnEvent, providerFromModel } from "./ai-log.js";
 import { resolveToolDef } from "./tools.js";
 import { invokeWriteTool } from "./tools.js";
 import { type ObjectiveProgress, recordUsage, type TurnContext } from "./types.js";
@@ -137,6 +138,10 @@ export async function judgeObjectives(ctx: TurnContext, node: FlowNode): Promise
 	const useOpenAI = !judgeOverride && !!env.OPENAI_API_KEY;
 	const judgeModel = judgeOverride ?? (useOpenAI ? env.OPENAI_JUDGE_MODEL : "grok-4-fast");
 	let parsed: z.infer<typeof judgeOutputSchema> | null = null;
+	const judgeMessages: ChatMessage[] = [
+		{ role: "system", content: OBJECTIVE_JUDGE_SYSTEM },
+		{ role: "user", content: `To collect:\n${unmet.map(objLine).join("\n")}\n\nConversation transcript:\n${transcript}` },
+	];
 	try {
 		const complete = useOpenAI ? openaiComplete : chatComplete;
 		const res = await complete({
@@ -144,12 +149,22 @@ export async function judgeObjectives(ctx: TurnContext, node: FlowNode): Promise
 			temperature: node.judge?.temperature ?? 0,
 			maxTokens: 400,
 			json: true,
-			messages: [
-				{ role: "system", content: OBJECTIVE_JUDGE_SYSTEM },
-				{ role: "user", content: `To collect:\n${unmet.map(objLine).join("\n")}\n\nConversation transcript:\n${transcript}` },
-			],
+			messages: judgeMessages,
 		});
 		recordUsage(ctx.state, "judge", res.usage.promptTokens, res.usage.completionTokens);
+		ctx.events.push(
+			aiTurnEvent({
+				cls: "judge",
+				title: "Evaluating Objectives",
+				provider: useOpenAI ? "OpenAI" : providerFromModel(judgeModel),
+				model: judgeModel,
+				promptTokens: res.usage.promptTokens,
+				completionTokens: res.usage.completionTokens,
+				request: judgeMessages,
+				response: res.text,
+				node: node.id,
+			}),
+		);
 		const clean = res.text
 			.trim()
 			.replace(/^```(?:json)?\s*/i, "")

@@ -7,6 +7,7 @@ import { newId } from "../id.js";
 import { env } from "../../env.js";
 import { anthropicComplete, chatComplete } from "../llm.js";
 import { recordUsage as meterUsage } from "../usage.js";
+import { aiTurnEvent, providerFromModel } from "./ai-log.js";
 import { allRequiredMet, armObjectives, judgeObjectives } from "./judge.js";
 import { maybeRefreshSummary, memorySettings } from "./memory.js";
 import { buildResponderMessages, buildSystemPrompt } from "./prompt.js";
@@ -325,6 +326,19 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 				timeoutMs: RESPONDER_TIMEOUT_MS,
 			});
 			recordUsage(state, "respond", res.usage.promptTokens, res.usage.completionTokens);
+			ctx.events.push(
+				aiTurnEvent({
+					cls: "respond",
+					title: node?.name ? `Agent Node — ${node.name}` : "Agent Node",
+					provider: useClaude ? "Anthropic" : providerFromModel(respondModel),
+					model: respondModel,
+					promptTokens: res.usage.promptTokens,
+					completionTokens: res.usage.completionTokens,
+					request: messages,
+					response: res.text,
+					node: node?.id,
+				}),
+			);
 			reply = res.text.trim() || null;
 		} catch (err) {
 			ctx.events.push({ type: "conversation.responder_error", payload: { error: err instanceof Error ? err.message : String(err) } });

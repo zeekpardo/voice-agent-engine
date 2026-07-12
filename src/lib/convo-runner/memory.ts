@@ -1,5 +1,6 @@
 import { env } from "../../env.js";
-import { chatComplete, openaiComplete } from "../llm.js";
+import { type ChatMessage, chatComplete, openaiComplete } from "../llm.js";
+import { aiTurnEvent, providerFromModel } from "./ai-log.js";
 import { recordUsage, type TurnContext } from "./types.js";
 
 /**
@@ -51,18 +52,31 @@ export async function maybeRefreshSummary(ctx: TurnContext): Promise<void> {
 	const override = settings.model ?? ctx.config.models?.summary;
 	const useOpenAI = !override && !!env.OPENAI_API_KEY;
 	const model = override ?? (useOpenAI ? env.OPENAI_SUMMARY_MODEL : "grok-4-fast");
+	const summaryMessages: ChatMessage[] = [
+		{ role: "system", content: SUMMARY_SYSTEM },
+		{ role: "user", content: `Conversation so far (earlier portion):\n${transcript}` },
+	];
 	try {
 		const complete = useOpenAI ? openaiComplete : chatComplete;
 		const res = await complete({
 			model,
 			temperature: 0,
 			maxTokens: 400,
-			messages: [
-				{ role: "system", content: SUMMARY_SYSTEM },
-				{ role: "user", content: `Conversation so far (earlier portion):\n${transcript}` },
-			],
+			messages: summaryMessages,
 		});
 		recordUsage(ctx.state, "summary", res.usage.promptTokens, res.usage.completionTokens);
+		ctx.events.push(
+			aiTurnEvent({
+				cls: "summary",
+				title: "Summarizing Conversation",
+				provider: useOpenAI ? "OpenAI" : providerFromModel(model),
+				model,
+				promptTokens: res.usage.promptTokens,
+				completionTokens: res.usage.completionTokens,
+				request: summaryMessages,
+				response: res.text,
+			}),
+		);
 		const summary = res.text.trim();
 		if (!summary) return;
 		ctx.state.rollingSummary = summary;
