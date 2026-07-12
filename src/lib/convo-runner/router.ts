@@ -14,7 +14,9 @@ import { tagRulesSatisfied, upsertContactState } from "./util.js";
  * AGENT node (or the end). Statement `say` lines encountered along the way are
  * collected into `saySoFar` and become part of the turn's reply.
  *
- * handoff / transfer nodes are NOT supported in v1: reaching one resolves to
+ * handoff nodes resolve to `{ kind: "handoff" }` — the orchestrator swaps the
+ * active agent to the target and continues (announced or seamless). transfer
+ * nodes are still NOT supported over the text path: reaching one resolves to
  * `{ kind: "unsupported" }`, and the orchestrator ends the conversation with a
  * conversation.unsupported_node event. The chain is bounded to 5 hops so a
  * misconfigured graph can't wedge a turn.
@@ -43,8 +45,26 @@ export async function resolveTarget(ctx: TurnContext, targetId: string | undefin
 			return { kind: "end", saySoFar };
 		}
 
-		if (node.kind === "handoff" || node.kind === "transfer") {
-			// v1 does not run agent handoffs or transfers over the text turn path.
+		if (node.kind === "handoff") {
+			// Agent handoff: hand the conversation to a DIFFERENT published agent.
+			// The orchestrator loads the target, swaps the active agent, and — per
+			// mode — sends a bridge + the target's entry greeting (announced) or
+			// continues silently (seamless). Text is turn-based: no hold music ever.
+			if (!node.handoffAgentId) {
+				return { kind: "unsupported", nodeId: node.id, reason: "handoff_missing_target", saySoFar };
+			}
+			return {
+				kind: "handoff",
+				nodeId: node.id,
+				agentId: node.handoffAgentId,
+				mode: node.handoff?.mode ?? "announced",
+				say: node.handoff?.say,
+				generate: node.handoff?.generate,
+				saySoFar,
+			};
+		}
+		if (node.kind === "transfer") {
+			// Human SIP transfer is not run over the text turn path.
 			return { kind: "unsupported", nodeId: node.id, reason: node.kind, saySoFar };
 		}
 

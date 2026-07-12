@@ -5,7 +5,7 @@ import { logConversationEvent } from "../conversation-events.js";
 import { resolveGroupRef } from "../group-ref.js";
 import { newId } from "../id.js";
 import { env } from "../../env.js";
-import { anthropicComplete, chatComplete } from "../llm.js";
+import { anthropicComplete, type ChatMessage, chatComplete } from "../llm.js";
 import { recordUsage as meterUsage } from "../usage.js";
 import { aiTurnEvent, providerFromModel } from "./ai-log.js";
 import { allRequiredMet, armObjectives, judgeObjectives } from "./judge.js";
@@ -75,6 +75,17 @@ export interface TurnResult {
 	status: string;
 	node_id: string | null;
 	ended: boolean;
+	/**
+	 * The agent messages produced this turn, in order. Usually a single element
+	 * (equal to `reply`); an ANNOUNCED agent handoff emits two — the source
+	 * bridge then the target's entry greeting — so a text/SMS consumer can send
+	 * them as back-to-back messages. `reply` remains the "\n\n"-joined form for
+	 * backward compatibility.
+	 */
+	messages?: string[];
+	/** Set when this turn handed the conversation to a different agent. */
+	agent_id?: string;
+	agent_version?: number;
 }
 
 /** Config + resolved tools (with secrets) for a pinned agent version. */
@@ -220,7 +231,9 @@ function primaryExitTarget(node: FlowNode, tagSet: Set<string>): string | undefi
 export async function runTurn(conversation: ConversationRow, text: string): Promise<TurnResult> {
 	if (conversation.status !== "active") return Promise.reject(new Error("conversation_ended"));
 
-	const bundle = await loadBundle(conversation.agent_id, conversation.agent_version);
+	// `bundle` is reassigned by an agent handoff mid-turn (the target's config
+	// takes over the reply).
+	let bundle = await loadBundle(conversation.agent_id, conversation.agent_version);
 	if (!bundle) return Promise.reject(new Error("agent_config_unavailable"));
 
 	// Normalize a possibly-partial persisted state (older rows / defaults).
@@ -261,6 +274,13 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 	let status = "active";
 	let ended = false;
 	const saySoFar: string[] = [];
+	// Agent-handoff bookkeeping: the active agent id/version can change mid-turn.
+	let agentId = conversation.agent_id;
+	let agentVersion = conversation.agent_version;
+	// Separate agent messages emitted by an ANNOUNCED handoff (bridge, greeting);
+	// when set they REPLACE the normal responder for this turn.
+	const handoffMessages: string[] = [];
+	let skipResponder = false;
 
 	// ── objectives judge + node advancement ─────────────────────────────────
 	if (node) {
@@ -283,8 +303,32 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 					nodeId = null;
 					status = "ended";
 					ended = true;
+				} else if (resolved.kind === "handoff") {
+					// Agent handoff (text): swap the active agent to the target and
+					// continue. Announced → bridge + target entry greeting (two
+					// messages, no hold music — text has none). Seamless → swap
+					// silently; the responder below generates a continuation under
+					// the target's config.
+					const swapped = await performHandoff(ctx, bundle, node, resolved);
+					if (!swapped) {
+						// Missing / cross-project / deleted target — end gracefully.
+						node = undefined;
+						nodeId = resolved.nodeId;
+						status = "ended";
+						ended = true;
+					} else {
+						bundle = swapped.bundle;
+						agentId = swapped.agentId;
+						agentVersion = swapped.version;
+						node = swapped.entryNode;
+						nodeId = swapped.entryNode?.id ?? null;
+						if (swapped.messages.length > 0) {
+							handoffMessages.push(...swapped.messages);
+							skipResponder = true;
+						}
+					}
 				} else {
-					// unsupported (transfer/handoff): end with a clear event.
+					// unsupported (transfer): end with a clear event.
 					ctx.events.push({
 						type: "conversation.unsupported_node",
 						payload: { node: resolved.nodeId, reason: resolved.reason },
@@ -301,58 +345,29 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 		}
 	}
 
-	// ── generate the reply from the resulting node (unless ended with a statement) ─
+	// ── generate the reply from the resulting node (unless ended, or the reply
+	// was already produced by a handoff bridge/greeting) ─
 	let reply: string | null = null;
-	if (!ended) {
-		const system = buildSystemPrompt(ctx, node);
-		const messages = buildResponderMessages(system, ctx.turns, memorySettings(ctx).windowTurns);
-		// Channel-aware model selection for the TEXT respond role:
-		//   1. an explicit per-agent models.respond override always wins (operator's
-		//      choice, generated via the xAI-compatible path as before);
-		//   2. otherwise, if ANTHROPIC_API_KEY is set, Claude (ANTHROPIC_TEXT_MODEL)
-		//      generates the reply — text reads warmer on Claude and this path has
-		//      no real-time latency budget;
-		//   3. otherwise fall back to the agent's default xAI model (pre-key behavior).
-		const respondOverride = bundle.config.models?.respond;
-		const useClaude = !respondOverride && !!env.ANTHROPIC_API_KEY;
-		const respondModel = respondOverride ?? (useClaude ? env.ANTHROPIC_TEXT_MODEL : bundle.config.llm.model);
-		try {
-			const complete = useClaude ? anthropicComplete : chatComplete;
-			const res = await complete({
-				model: respondModel,
-				temperature: node?.llm?.temperature ?? bundle.config.llm.temperature,
-				maxTokens: node?.llm?.maxTokens ?? bundle.config.llm.maxTokens,
-				messages,
-				timeoutMs: RESPONDER_TIMEOUT_MS,
-			});
-			recordUsage(state, "respond", res.usage.promptTokens, res.usage.completionTokens);
-			ctx.events.push(
-				aiTurnEvent({
-					cls: "respond",
-					title: node?.name ? `Agent Node — ${node.name}` : "Agent Node",
-					provider: useClaude ? "Anthropic" : providerFromModel(respondModel),
-					model: respondModel,
-					promptTokens: res.usage.promptTokens,
-					completionTokens: res.usage.completionTokens,
-					request: messages,
-					response: res.text,
-					node: node?.id,
-				}),
-			);
-			reply = res.text.trim() || null;
-		} catch (err) {
-			ctx.events.push({ type: "conversation.responder_error", payload: { error: err instanceof Error ? err.message : String(err) } });
-			reply = null;
-		}
+	if (!ended && !skipResponder) {
+		const messages = buildResponderMessages(buildSystemPrompt(ctx, node), ctx.turns, memorySettings(ctx).windowTurns);
+		reply = await respond(ctx, bundle, node, messages);
 	}
 
-	// Statement lines collected while advancing precede the generated reply.
-	if (saySoFar.length > 0) {
-		reply = [...saySoFar, ...(reply ? [reply] : [])].join("\n\n");
+	// Assemble this turn's agent messages, in order. An ANNOUNCED handoff emits
+	// its own message(s) — the bridge then the target greeting — INSTEAD of the
+	// responder; otherwise the statement lines collected while advancing precede
+	// the generated reply, joined into a single message (unchanged behavior).
+	let agentReplies: string[];
+	if (handoffMessages.length > 0) {
+		agentReplies = saySoFar.length > 0 ? [saySoFar.join("\n\n"), ...handoffMessages] : [...handoffMessages];
+	} else {
+		const combined = [...saySoFar, ...(reply ? [reply] : [])].join("\n\n");
+		agentReplies = combined ? [combined] : [];
 	}
+	reply = agentReplies.length > 0 ? agentReplies.join("\n\n") : null;
 
-	// Reflect the full turn (incl. reply) into the buffer before summarizing.
-	if (reply) ctx.turns.push({ role: "agent", text: reply });
+	// Reflect the emitted agent messages into the buffer before summarizing.
+	for (const m of agentReplies) ctx.turns.push({ role: "agent", text: m });
 
 	// Rolling-summary refresh at the interval boundary (uses the updated turnCount).
 	await maybeRefreshSummary(ctx);
@@ -362,16 +377,19 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 		await tx`
 			INSERT INTO conversation_messages (id, conversation_id, role, text, created_at)
 			VALUES (${newId("cmsg")}, ${conversation.id}, 'user', ${text}, clock_timestamp())`;
-		if (reply) {
+		// Each agent message persists as its own row (an announced handoff writes
+		// two — bridge, then target greeting), ordered by clock_timestamp().
+		for (const m of agentReplies) {
 			await tx`
 				INSERT INTO conversation_messages (id, conversation_id, role, text, created_at)
-				VALUES (${newId("cmsg")}, ${conversation.id}, 'agent', ${reply}, clock_timestamp())`;
+				VALUES (${newId("cmsg")}, ${conversation.id}, 'agent', ${m}, clock_timestamp())`;
 		}
 		// Reflect the (possibly grown) tag set back into persisted state.
 		state.contactTags = [...ctx.tagSet];
 		await tx`
 			UPDATE conversations SET
-				state = ${jsonb(state)}, node_id = ${nodeId}, status = ${status}, updated_at = now()
+				state = ${jsonb(state)}, node_id = ${nodeId}, status = ${status},
+				agent_id = ${agentId}, agent_version = ${agentVersion}, updated_at = now()
 			WHERE id = ${conversation.id}`;
 		for (const ev of ctx.events) {
 			await logConversationEvent(tx, { conversationId: conversation.id, type: ev.type, payload: ev.payload });
@@ -380,7 +398,15 @@ export async function runTurn(conversation: ConversationRow, text: string): Prom
 
 	meterTurn(conversation.project, conversation.id, usageBefore, state.usage);
 
-	return { reply, status, node_id: nodeId, ended };
+	return {
+		reply,
+		status,
+		node_id: nodeId,
+		ended,
+		messages: agentReplies.length > 0 ? agentReplies : undefined,
+		agent_id: agentId,
+		agent_version: agentVersion,
+	};
 }
 
 /**
@@ -403,6 +429,155 @@ async function advance(ctx: TurnContext, fromNode: FlowNode): Promise<ResolvedTa
 		resolved = next;
 	}
 	return { ...resolved, saySoFar } as ResolvedTarget;
+}
+
+// ── responder ────────────────────────────────────────────────────────────────
+
+/**
+ * Generate one agent reply from `node` under `bundle`'s config, recording usage
+ * and an ai.turn event. Channel-aware model selection for the TEXT respond role:
+ *   1. an explicit per-agent models.respond override always wins (operator's
+ *      choice, via the xAI-compatible path);
+ *   2. else, if ANTHROPIC_API_KEY is set, Claude (ANTHROPIC_TEXT_MODEL) generates
+ *      it — text reads warmer on Claude and this path has no latency budget;
+ *   3. else the agent's default xAI model (pre-key behavior).
+ * `title` overrides the ai.turn label (e.g. a handoff bridge/greeting).
+ */
+async function respond(
+	ctx: TurnContext,
+	bundle: AgentBundle,
+	node: FlowNode | undefined,
+	messages: ChatMessage[],
+	title?: string,
+): Promise<string | null> {
+	const respondOverride = bundle.config.models?.respond;
+	const useClaude = !respondOverride && !!env.ANTHROPIC_API_KEY;
+	const respondModel = respondOverride ?? (useClaude ? env.ANTHROPIC_TEXT_MODEL : bundle.config.llm.model);
+	try {
+		const complete = useClaude ? anthropicComplete : chatComplete;
+		const res = await complete({
+			model: respondModel,
+			temperature: node?.llm?.temperature ?? bundle.config.llm.temperature,
+			maxTokens: node?.llm?.maxTokens ?? bundle.config.llm.maxTokens,
+			messages,
+			timeoutMs: RESPONDER_TIMEOUT_MS,
+		});
+		recordUsage(ctx.state, "respond", res.usage.promptTokens, res.usage.completionTokens);
+		ctx.events.push(
+			aiTurnEvent({
+				cls: "respond",
+				title: title ?? (node?.name ? `Agent Node — ${node.name}` : "Agent Node"),
+				provider: useClaude ? "Anthropic" : providerFromModel(respondModel),
+				model: respondModel,
+				promptTokens: res.usage.promptTokens,
+				completionTokens: res.usage.completionTokens,
+				request: messages,
+				response: res.text,
+				node: node?.id,
+			}),
+		);
+		return res.text.trim() || null;
+	} catch (err) {
+		ctx.events.push({ type: "conversation.responder_error", payload: { error: err instanceof Error ? err.message : String(err) } });
+		return null;
+	}
+}
+
+// ── agent handoff (text) ─────────────────────────────────────────────────────
+
+/**
+ * Resolve an agent-handoff target: load the target published agent's CURRENT
+ * version + config + tools, scoped to `project`. A cross-project or
+ * missing/deleted target returns null (the text analogue of the voice worker's
+ * cross-project refusal — the query's `project =` predicate is the boundary).
+ */
+async function loadTargetBundle(project: string, agentId: string): Promise<{ bundle: AgentBundle; version: number } | null> {
+	const rows = await sql`
+		SELECT version FROM agents WHERE id = ${agentId} AND project = ${project} AND status != 'deleted'`;
+	if (!rows[0]) return null;
+	const version = Number(rows[0].version);
+	const bundle = await loadBundle(agentId, version);
+	if (!bundle) return null;
+	return { bundle, version };
+}
+
+/**
+ * Perform an agent handoff over the text turn path. Loads the target, swaps the
+ * turn's ctx (config/tools/nodes/agentId) to it, exposes the target's name as
+ * {{agent_name}}, and resets objective progress for the target's flow. For
+ * ANNOUNCED mode it returns the bridge (source agent's persona) + the target's
+ * entry greeting as separate messages; SEAMLESS returns none (the orchestrator's
+ * responder then continues under the target). No hold music — text has none.
+ * Returns null when the target is missing / cross-project / deleted.
+ */
+async function performHandoff(
+	ctx: TurnContext,
+	sourceBundle: AgentBundle,
+	sourceNode: FlowNode | undefined,
+	resolved: Extract<ResolvedTarget, { kind: "handoff" }>,
+): Promise<{ bundle: AgentBundle; agentId: string; version: number; entryNode: FlowNode | undefined; messages: string[] } | null> {
+	const loaded = await loadTargetBundle(ctx.project, resolved.agentId);
+	if (!loaded) {
+		ctx.events.push({
+			type: "conversation.handoff_failed",
+			payload: { from: resolved.nodeId, toAgentId: resolved.agentId, reason: "target_unavailable" },
+		});
+		return null;
+	}
+	const { bundle: targetBundle, version } = loaded;
+	const targetName = targetBundle.config.name;
+	const mode = resolved.mode;
+	const window = memorySettings(ctx).windowTurns;
+	const messages: string[] = [];
+
+	// Expose {{agent_name}} up front so both the bridge ("passing you to
+	// {{agent_name}}") and the target greeting ("Hi, this is {{agent_name}}")
+	// resolve it.
+	ctx.state.variables.agent_name = targetName;
+
+	// ANNOUNCED bridge — built while ctx still reflects the SOURCE agent (the
+	// bridge speaks in the source persona).
+	if (mode === "announced" && resolved.say?.trim()) {
+		const say = interpolate(resolved.say.trim(), ctx.state.variables);
+		if (resolved.generate) {
+			const system = `${buildSystemPrompt(ctx, sourceNode)}\n\nSend ONE short message, in the language the person is using, telling them you're passing them to a teammate — vary the phrasing so it never sounds scripted. Base it on: ${say}`;
+			const bridge = await respond(ctx, sourceBundle, sourceNode, buildResponderMessages(system, ctx.turns, window), "Handoff bridge");
+			if (bridge) messages.push(bridge);
+		} else {
+			messages.push(say);
+		}
+	}
+
+	// Swap ctx to the TARGET agent.
+	ctx.config = targetBundle.config;
+	ctx.tools = targetBundle.tools;
+	ctx.agentId = resolved.agentId;
+	ctx.nodesById = nodesByIdOf(targetBundle.config);
+	ctx.state.objectives = {};
+	ctx.state.objectivesNode = undefined;
+
+	const targetFlow = targetBundle.config.flow;
+	const entryNode = targetFlow ? targetFlow.nodes.find((n) => n.id === targetFlow.entry) : undefined;
+
+	ctx.events.push({
+		type: "conversation.handoff",
+		payload: { from: resolved.nodeId, toAgentId: resolved.agentId, toVersion: version, mode },
+	});
+
+	// ANNOUNCED greeting — the target opens with its entry greeting (the entry
+	// node's entryInstructions as a direction, else a generic self-intro). SEAMLESS
+	// skips it: the orchestrator's responder continues under the target instead.
+	if (mode === "announced") {
+		const opening = entryNode?.entryInstructions?.trim();
+		const greetInstr = opening
+			? `You have just taken over this same ongoing conversation. ${interpolate(opening, ctx.state.variables)} Greet the person and introduce yourself. Do not recap what was already covered. Reply in the language the person is using.`
+			: `You have just taken over this same ongoing conversation. Briefly introduce yourself as ${targetName} and greet the person warmly. Do not recap what was already covered. Reply in the language the person is using.`;
+		const system = `${buildSystemPrompt(ctx, entryNode)}\n\n${greetInstr}`;
+		const greeting = await respond(ctx, targetBundle, entryNode, buildResponderMessages(system, ctx.turns, window), "Handoff greeting");
+		if (greeting) messages.push(greeting);
+	}
+
+	return { bundle: targetBundle, agentId: resolved.agentId, version, entryNode, messages };
 }
 
 // ── end ──────────────────────────────────────────────────────────────────────
