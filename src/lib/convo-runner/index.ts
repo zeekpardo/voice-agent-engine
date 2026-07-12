@@ -1,5 +1,5 @@
 import type { AgentConfigT, FlowNode } from "@voice-engine/shared/agent-config";
-import { interpolate } from "@voice-engine/shared/agent-config";
+import { interpolate, pruneFlowForChannel } from "@voice-engine/shared/agent-config";
 import { jsonb, sql } from "../../db/index.js";
 import { logConversationEvent } from "../conversation-events.js";
 import { resolveGroupRef } from "../group-ref.js";
@@ -125,7 +125,7 @@ async function loadBundle(agentId: string, version: number): Promise<AgentBundle
 	const snap = await sql`
 		SELECT config FROM agent_versions WHERE agent_id = ${agentId} AND version = ${version}`;
 	if (!snap[0]) return null;
-	const config = snap[0].config as AgentConfigT;
+	const config = textFlowConfig(snap[0].config as AgentConfigT);
 	const toolIds = config.toolIds ?? [];
 	const tools =
 		toolIds.length > 0
@@ -134,6 +134,22 @@ async function loadBundle(agentId: string, version: number): Promise<AgentBundle
 				FROM tools WHERE project = ${agent.project as string} AND id = ANY(${toolIds}) AND enabled`) as unknown as ToolDef[])
 			: [];
 	return { project: agent.project as string, config, tools };
+}
+
+/**
+ * Return `config` with its flow pruned to the TEXT channel. The convo-runner is
+ * the room-less text/SMS surface (the voice worker runs the full flow), and the
+ * gateway serves BOTH channels from the same published `config.flow` — so voice-
+ * only nodes (e.g. `transfer`, which the SaaS compiler always marks voice-only:
+ * announcement + hold music + voice swap / SIP forward, with no text equivalent)
+ * are stripped here and their edges spliced through, rather than dead-ending the
+ * conversation on `conversation.unsupported_node`. A flow with no channel marks
+ * is returned by reference unchanged, so this is zero-cost for the common case.
+ */
+function textFlowConfig(config: AgentConfigT): AgentConfigT {
+	if (!config.flow) return config;
+	const flow = pruneFlowForChannel(config.flow, "text");
+	return flow === config.flow ? config : { ...config, flow };
 }
 
 function nodesByIdOf(config: AgentConfigT): Map<string, FlowNode> {
@@ -175,7 +191,9 @@ export async function createConversation(
 	const agent = agents[0];
 	if (!agent) return Promise.reject(new Error("agent_not_found"));
 
-	const config = agent.config as AgentConfigT;
+	// Text/SMS surface: run the text-pruned flow (see textFlowConfig) so the
+	// entry + greeting resolve past any voice-only entry-adjacent nodes.
+	const config = textFlowConfig(agent.config as AgentConfigT);
 	const version = Number(agent.version);
 	const metadata = input.metadata ?? {};
 	const groupRef = resolveGroupRef(input.groupRef, metadata);
