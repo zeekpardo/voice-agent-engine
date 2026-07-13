@@ -3,6 +3,7 @@ import { inference, llm, voice } from "@livekit/agents";
 import { LLM as AnthropicLLM } from "@livekit/agents-plugin-anthropic";
 import type { JSONSchema7 } from "json-schema";
 import { env } from "../env.js";
+import { DATA_BOUNDARY_GUARDRAIL } from "../vendor/agent-config.js";
 import { type AgentBundle, type AgentConfig, type ContactStateEntryT, type DispatchMetadata, reportEvent } from "../gateway.js";
 import { buildTools } from "../tools.js";
 import { createAgentBuilder } from "./agent-builder.js";
@@ -108,6 +109,10 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 
 	// Global blocks shared by every node/agent (inherited so node prompts stay lean).
 	const globalInstructions = interpolate(config.instructions, variables);
+	// Always-on prompt-injection guardrail (plan item 12). Rides on every prompt —
+	// single-agent (in `instructions` below) and every flow node (via flowCtx) — so
+	// the fenced KNOWN CONTACT INFO data is always anchored as untrusted data.
+	const dataGuardrail = DATA_BOUNDARY_GUARDRAIL;
 	const prohibited =
 		(config.prohibitedWords ?? []).length > 0
 			? `\n\n## PROHIBITED WORDS\nNever say any of these words or phrases, in any form: ${config.prohibitedWords!.join(", ")}.`
@@ -181,6 +186,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 
 	const instructions =
 		globalInstructions +
+		dataGuardrail +
 		pacingRules +
 		conversationStyle +
 		languageRules +
@@ -402,6 +408,7 @@ export function assembleAgent(shared: AssembleShared, params: AssembleParams): A
 		recordUsage: (cls, inTok, outTok) => state.usage.record(cls, inTok, outTok),
 		models,
 		globalInstructions,
+		dataGuardrail,
 		pacingRules,
 		conversationStyle,
 		noEarlyWrapUp,
