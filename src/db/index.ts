@@ -332,6 +332,30 @@ const MIGRATIONS: { version: number; name: string; up: string }[] = [
 			ON calls(created_at) WHERE status = 'queued' AND queued_reason = 'capacity';
 		`,
 	},
+	{
+		version: 11,
+		name: "daily-call-limits",
+		// Per-org rolling-24h call-count ceiling (spend backstop). Sibling of
+		// concurrency_limits, same admin/route shape, kept in its own table so an
+		// admin can set a daily cap WITHOUT also having to set a concurrency cap
+		// (concurrency_limits.max_concurrent is NOT NULL). One row per
+		// (project, scope, ref): scope is 'project' | 'group', ref is '' for
+		// project scope and the opaque group_ref otherwise. Absence of a row =>
+		// the DEFAULT_MAX_CALLS_PER_DAY env default (never unlimited-by-accident).
+		//
+		// The rolling-24h count reuses the existing idx_calls_group
+		// (project, group_ref, created_at) — no new index is needed.
+		up: `
+		CREATE TABLE IF NOT EXISTS daily_call_limits (
+			project      TEXT NOT NULL,
+			scope        TEXT NOT NULL,              -- project | group
+			ref          TEXT NOT NULL DEFAULT '',   -- '' for project; opaque group_ref otherwise
+			max_per_day  INTEGER NOT NULL,
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+			UNIQUE (project, scope, ref)
+		);
+		`,
+	},
 ];
 
 /** Apply pending migrations on boot. */

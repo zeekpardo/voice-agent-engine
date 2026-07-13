@@ -65,9 +65,19 @@ const schema = z.object({
 	CHAT_DEFAULT_MODEL: z.string().default("grok-4-fast"),
 	TTS_DEFAULT_VOICE: z.string().default("ara"),
 	// Per-tenant concurrency limiting (multi-account plan §2). The project-scope
-	// default applied when no concurrency_limits row overrides it; unset = the
-	// project is unlimited (per-agent/group are always unlimited without a row).
-	DEFAULT_MAX_CONCURRENT_CALLS: z.coerce.number().int().positive().optional(),
+	// concurrent-call cap applied when no concurrency_limits row overrides it.
+	// Defaults to a GENEROUS 25 so a fresh deploy carries a safety backstop
+	// instead of unbounded concurrency (never throttles a real demo); tune per
+	// deploy. Any concurrency_limits row still overrides this; per-agent/group
+	// stay unlimited without a row.
+	DEFAULT_MAX_CONCURRENT_CALLS: z.coerce.number().int().positive().default(25),
+	// Per-org (per group_ref) rolling-24h call-count ceiling — a coarse spend
+	// backstop layered on top of concurrency. Applied when no daily_call_limits
+	// row overrides it for the group/project. Defaults to a GENEROUS 1000/day so
+	// no-config never throttles legitimate traffic; a daily_call_limits row
+	// (project or group scope) overrides it. ONLY enforced for calls tagged with
+	// a group_ref — untagged/legacy calls are never blocked by this cap.
+	DEFAULT_MAX_CALLS_PER_DAY: z.coerce.number().int().positive().default(1000),
 	// How long an outbound call may sit queued at capacity before it is canceled
 	// with end_reason 'queue_expired'. Default 30 min.
 	QUEUE_EXPIRY_SECONDS: z.coerce.number().int().positive().default(1800),
