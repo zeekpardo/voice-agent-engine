@@ -3,6 +3,7 @@ import type { AppEnv } from "../app-types.js";
 import { listKeys, mintKey } from "../auth/keys.js";
 import { env } from "../env.js";
 import { badRequest, unauthorized } from "../lib/errors.js";
+import { safeEqualStr } from "../lib/timing-safe.js";
 import { usageSummary } from "../lib/usage.js";
 
 /**
@@ -17,7 +18,7 @@ admin.use("*", async (c, next) => {
 	const header = c.req.header("Authorization") ?? "";
 	const m = header.match(/^Bearer\s+(.+)$/i);
 	const token = m ? m[1]!.trim() : c.req.header("x-admin-token");
-	if (!token || token !== env.ADMIN_TOKEN) throw unauthorized("Invalid admin token");
+	if (!safeEqualStr(token, env.ADMIN_TOKEN)) throw unauthorized("Invalid admin token");
 	await next();
 });
 
