@@ -1,6 +1,7 @@
 import { signPayload } from "@voice-engine/shared/hmac";
 import { sql } from "../db/index.js";
 import { newId } from "./id.js";
+import { assertSafeUrl } from "./safe-url.js";
 
 /**
  * Events out (spec §8.1): HMAC-signed webhooks, at-least-once with exponential
@@ -61,6 +62,22 @@ export async function processPendingDeliveries(): Promise<void> {
 			const body = JSON.stringify(d.payload);
 			const ts = Math.floor(Date.now() / 1000).toString();
 			let status = 0;
+			// SSRF re-check at fetch time: re-validate the stored URL's host right
+			// before dialing out. Defends against rows written before this guard
+			// existed and re-asserts the host is not private/reserved. FOLLOW-UP:
+			// this validates the literal host, NOT the resolved socket — full DNS-
+			// rebinding protection needs a pinned-lookup fetch agent that re-checks
+			// the connected IP.
+			try {
+				assertSafeUrl(d.url as string);
+			} catch (err) {
+				await sql`
+					UPDATE webhook_deliveries
+					SET status = 'failed', attempts = ${Number(d.attempts) + 1}, last_status = 0, updated_at = now()
+					WHERE id = ${d.id as string}`;
+				console.error(`webhook delivery ${d.id as string} blocked by SSRF guard:`, err);
+				continue;
+			}
 			try {
 				const res = await fetch(d.url as string, {
 					method: "POST",

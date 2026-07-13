@@ -6,6 +6,7 @@ import { jsonb, sql } from "../db/index.js";
 import { AppError, badRequest } from "../lib/errors.js";
 import { parseBody } from "../lib/http.js";
 import { newId } from "../lib/id.js";
+import { safeHttpUrl } from "../lib/safe-url.js";
 
 /**
  * /v1/tools — tools-as-webhooks registration (spec §8). The engine executes
@@ -25,7 +26,8 @@ const ToolBody = z.object({
 		.regex(/^[a-zA-Z0-9_-]+$/, "letters, digits, _ and - only (used as the LLM function name)"),
 	description: z.string().min(1),
 	json_schema: z.record(z.unknown()), // JSON Schema for the LLM arguments
-	endpoint_url: z.string().url(),
+	// SSRF guard: https-only, no localhost / RFC1918 / link-local / metadata hosts.
+	endpoint_url: safeHttpUrl(),
 	timeout_ms: z.number().int().min(500).max(30_000).default(4000),
 	enabled: z.boolean().default(true),
 });
