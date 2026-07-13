@@ -6,7 +6,7 @@ import { jsonb, sql } from "../db/index.js";
 import { AppError, badRequest } from "../lib/errors.js";
 import { parseBody } from "../lib/http.js";
 import { newId } from "../lib/id.js";
-import { safeHttpUrl } from "../lib/safe-url.js";
+import { safeHttpUrl } from "@voice-engine/shared/safe-url";
 
 /**
  * /v1/tools — tools-as-webhooks registration (spec §8). The engine executes

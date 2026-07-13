@@ -1,7 +1,7 @@
 import { signPayload } from "@voice-engine/shared/hmac";
 import { sql } from "../db/index.js";
 import { newId } from "./id.js";
-import { assertSafeUrl } from "./safe-url.js";
+import { assertSafeUrl } from "@voice-engine/shared/safe-url";
 
 /**
  * Events out (spec §8.1): HMAC-signed webhooks, at-least-once with exponential
