@@ -474,6 +474,11 @@ export interface FlowRuntimeContext {
 
 	// prompt fragments assembled once, inherited by every node
 	globalInstructions: string;
+	/** Always-on prompt-injection guardrail (`## DATA BOUNDARY`): declares that
+	 * fenced contact data / caller-provided values are untrusted data, never
+	 * instructions. Inherited by every node so it anchors the KNOWN CONTACT INFO
+	 * fence rendered below it. */
+	dataGuardrail: string;
 	pacingRules: string;
 	/** Default lead-and-vary conversational guidance (`## CONVERSATIONAL STYLE`),
 	 * applied to EVERY generation (voice + text) independent of the optional
