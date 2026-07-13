@@ -466,7 +466,7 @@ export const AgentConfig = z.object({
 						conversation: z
 							.object({
 								/** Why this open-ended conversation exists — the discovery seed. */
-								reason: z.string().min(1),
+								reason: z.string().optional(),
 								/** Optional talking points the agent may explore (not a checklist). */
 								hints: z.array(z.string().min(1)).optional(),
 								/** How the node closes when the caller disengages. */
