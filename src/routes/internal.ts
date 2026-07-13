@@ -8,6 +8,7 @@ import { checkCapacity } from "../lib/concurrency.js";
 import { badRequest, unauthorized } from "../lib/errors.js";
 import { parseBody } from "../lib/http.js";
 import { newId } from "../lib/id.js";
+import { safeEqualStr } from "../lib/timing-safe.js";
 import { type PostCallConfig, summarizeAndExtract } from "../lib/postcall.js";
 import { recordUsage, type UsageKind } from "../lib/usage.js";
 import { emitEvent } from "../lib/webhooks.js";
@@ -26,7 +27,7 @@ internal.use("*", async (c, next) => {
 	const header = c.req.header("Authorization") ?? "";
 	const m = header.match(/^Bearer\s+(.+)$/i);
 	const token = m ? m[1]!.trim() : c.req.header("x-internal-key");
-	if (!token || token !== env.INTERNAL_KEY) throw unauthorized("Invalid internal key");
+	if (!safeEqualStr(token, env.INTERNAL_KEY)) throw unauthorized("Invalid internal key");
 	await next();
 });
 
