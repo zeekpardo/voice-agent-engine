@@ -170,15 +170,20 @@ export function buildSystemPrompt(ctx: TurnContext, node: FlowNode | undefined):
 	const stageInstr = interp(node.instructions).trim();
 	const stageBlock = stageInstr ? `\n\n## YOUR CURRENT STAGE\n${stageInstr}` : "";
 
-	const conversationReasonBlock = isConversation
-		? `\n\n## CONVERSATION REASON\n${interp(conversation!.reason)}${
-				conversation!.hints?.length
-					? `\n\nTalking points you can naturally explore (not a checklist — follow the person's lead, one question at a time):\n${conversation!.hints
-							.map((h) => `- ${interp(h)}`)
-							.join("\n")}`
-					: ""
-			}`
-		: "";
+	// `reason` is now optional. Emit the block ONLY when a non-empty reason is
+	// present; a simplified "keep chatting" node runs from the agent-level goal in
+	// `instructions`, so an empty reason yields no block.
+	const conversationReason = (conversation?.reason ?? "").trim();
+	const conversationReasonBlock =
+		isConversation && conversationReason
+			? `\n\n## CONVERSATION REASON\n${interp(conversationReason)}${
+					conversation!.hints?.length
+						? `\n\nTalking points you can naturally explore (not a checklist — follow the person's lead, one question at a time):\n${conversation!.hints
+								.map((h) => `- ${interp(h)}`)
+								.join("\n")}`
+						: ""
+				}`
+			: "";
 
 	const objectivesBlock = hasObjectives
 		? `\n\n## OBJECTIVES\nIn this stage you must learn the following from the person, naturally and ONE question at a time:\n${objectives

@@ -198,15 +198,21 @@ export function createAgentBuilder(ctx: FlowRuntimeContext, deps: AgentBuilderDe
 
 		// Conversation-mode blocks (Phase 2). The reason (+ optional hints) replaces
 		// the objectives block; closure is explicit rather than emergent.
-		const conversationReasonBlock = isConversation
-			? `\n\n## CONVERSATION REASON\n${ctx.interpolate(conversation!.reason)}${
-					conversation!.hints?.length
-						? `\n\nTalking points you can naturally explore (not a checklist — follow the caller's lead, one question at a time):\n${conversation!.hints
-								.map((h) => `- ${ctx.interpolate(h)}`)
-								.join("\n")}`
-						: ""
-				}`
-			: "";
+		// `reason` is now optional (a simplified "keep chatting" node runs from the
+		// agent-level goal in `instructions`, no per-node reason). Emit the block ONLY
+		// when a non-empty reason is present; otherwise nothing (the "why" is covered
+		// by the composed instructions). Hints still attach under the reason heading.
+		const conversationReason = (conversation?.reason ?? "").trim();
+		const conversationReasonBlock =
+			isConversation && conversationReason
+				? `\n\n## CONVERSATION REASON\n${ctx.interpolate(conversationReason)}${
+						conversation!.hints?.length
+							? `\n\nTalking points you can naturally explore (not a checklist — follow the caller's lead, one question at a time):\n${conversation!.hints
+									.map((h) => `- ${ctx.interpolate(h)}`)
+									.join("\n")}`
+							: ""
+					}`
+				: "";
 		const wrapUp = conversation?.wrapUp;
 		const closeAction =
 			wrapUp?.mode === "exit"
