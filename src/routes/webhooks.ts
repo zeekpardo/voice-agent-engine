@@ -6,6 +6,7 @@ import { sql } from "../db/index.js";
 import { AppError } from "../lib/errors.js";
 import { parseBody } from "../lib/http.js";
 import { newId } from "../lib/id.js";
+import { safeHttpUrl } from "../lib/safe-url.js";
 
 /**
  * /v1/webhooks — where the consuming app receives engine events (spec §8.1).
@@ -30,7 +31,8 @@ const KNOWN_EVENTS = [
 ] as const;
 
 const WebhookBody = z.object({
-	url: z.string().url(),
+	// SSRF guard: https-only, no localhost / RFC1918 / link-local / metadata hosts.
+	url: safeHttpUrl(),
 	/** Empty / omitted = receive all events. */
 	event_filter: z.array(z.enum(KNOWN_EVENTS)).default([]),
 });

@@ -1,4 +1,5 @@
 import { signPayload } from "@voice-engine/shared/hmac";
+import { assertSafeUrl } from "../safe-url.js";
 import type { ToolDef, TurnContext } from "./types.js";
 
 /**
@@ -47,6 +48,11 @@ export async function invokeWriteTool(t: ToolDef, ctx: TurnContext, args: Record
 	ctx.events.push({ type: "tool.invoked", payload: { tool: t.name, arguments: args } });
 
 	try {
+		// SSRF re-check at fetch time: re-validate the tool's stored endpoint host
+		// before dialing out (defends rows written before the create-time guard).
+		// FOLLOW-UP: validates the literal host, not the resolved socket — full DNS-
+		// rebinding protection needs a pinned-lookup fetch agent.
+		assertSafeUrl(t.endpoint_url);
 		const res = await fetch(t.endpoint_url, {
 			method: "POST",
 			headers: {
