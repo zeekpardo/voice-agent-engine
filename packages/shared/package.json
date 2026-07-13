@@ -7,7 +7,8 @@
 	"exports": {
 		"./hmac": "./src/hmac.ts",
 		"./slugify": "./src/slugify.ts",
-		"./agent-config": "./src/agent-config.ts"
+		"./agent-config": "./src/agent-config.ts",
+		"./safe-url": "./src/safe-url.ts"
 	},
 	"dependencies": {
 		"zod": "^3.24.1"

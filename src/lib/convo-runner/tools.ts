@@ -1,5 +1,5 @@
 import { signPayload } from "@voice-engine/shared/hmac";
-import { assertSafeUrl } from "../safe-url.js";
+import { assertSafeUrl } from "@voice-engine/shared/safe-url";
 import type { ToolDef, TurnContext } from "./types.js";
 
 /**

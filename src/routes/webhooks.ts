@@ -6,7 +6,7 @@ import { sql } from "../db/index.js";
 import { AppError } from "../lib/errors.js";
 import { parseBody } from "../lib/http.js";
 import { newId } from "../lib/id.js";
-import { safeHttpUrl } from "../lib/safe-url.js";
+import { safeHttpUrl } from "@voice-engine/shared/safe-url";
 
 /**
  * /v1/webhooks — where the consuming app receives engine events (spec §8.1).
